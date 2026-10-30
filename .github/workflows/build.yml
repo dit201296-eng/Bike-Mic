@@ -89,16 +89,30 @@ jobs:
             namespace 'com.bikemic.app'
             compileSdk 34
 
+            signingConfigs {
+                release {
+                    storeFile file('bike.keystore')
+                    storePassword 'adballah05021996'
+                    keyAlias 'bikekey'
+                    keyPassword 'adballah05021996'
+                }
+            }
+
             defaultConfig {
                 applicationId "com.bikemic.app"
                 minSdk 26
                 targetSdk 34
                 versionCode 1
                 versionName "1.0"
+                signingConfig signingConfigs.release
             }
 
             buildTypes {
+                debug {
+                    signingConfig signingConfigs.release
+                }
                 release {
+                    signingConfig signingConfigs.release
                     minifyEnabled false
                     proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
                 }
@@ -171,6 +185,11 @@ jobs:
         rootProject.name = "BikeMic"
         include ':app'
         EOF
+
+        # توليد مفتاح التوقيع مباشرة داخل السكربت باستخدام كلمة المرور الخاصة بك
+        cd app
+        keytool -genkey -v -keystore bike.keystore -alias bikekey -keyalg RSA -keysize 2048 -validity 10000 -storepass adballah05021996 -keypass adballah05021996 -dname "CN=Abdullah, OU=BikeMic, O=Oman, L=AlDhahirah, C=OM" || true
+        cd ..
 
         cat << 'EOF' > app/src/main/java/com/bikemic/app/MainActivity.kt
         package com.bikemic.app
@@ -253,7 +272,7 @@ jobs:
 
         @Composable
         fun MainScreen() {
-            var username by remember { mutableStateOf("قائد السلسلة (أبو ناصر)") }
+            var username by remember { mutableStateOf("أبو ناصر (قائد السلسلة)") }
             var isTransmitting by remember { mutableStateOf(false) }
             var micActive by remember { mutableStateOf(false) }
             var showUsersDialog by remember { mutableStateOf(false) }
@@ -450,7 +469,6 @@ jobs:
         echo '<resources></resources>' > app/src/main/res/values/strings.xml
         echo '<resources></resources>' > app/src/main/res/values/styles.xml
         echo 'gradle.version=8.7' > gradle.properties
-        EOF
 
     - name: Generate Gradle Wrapper
       run: |
