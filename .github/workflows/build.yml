@@ -1,4 +1,4 @@
-Name: Build BikeMic Live Audio APK
+name: Build BikeMic Live Audio APK
 
 on:
   push:
@@ -43,7 +43,6 @@ jobs:
       run: |
         mkdir -p app/src/main/java/com/bikemic/app app/src/main/res/values app/src/main/res/layout
         
-        # 1. AndroidManifest.xml
         cat << 'EOF' > app/src/main/AndroidManifest.xml
         <?xml version="1.0" encoding="utf-8"?>
         <manifest xmlns:android="http://schemas.android.com/apk/res/android"
@@ -80,7 +79,6 @@ jobs:
         </manifest>
         EOF
 
-        # 2. build.gradle (Module: app)
         cat << 'EOF' > app/build.gradle
         plugins {
             id 'com.android.application'
@@ -133,7 +131,6 @@ jobs:
         }
         EOF
 
-        # 3. build.gradle (Project level)
         cat << 'EOF' > build.gradle
         buildscript {
             repositories {
@@ -156,7 +153,6 @@ jobs:
         }
         EOF
 
-        # 4. settings.gradle
         cat << 'EOF' > settings.gradle
         pluginManagement {
             repositories {
@@ -176,7 +172,6 @@ jobs:
         include ':app'
         EOF
 
-        # 5. MainActivity.kt (التحكم المباشر بالصوت وزر البرقية ونظام الـ UDP المباشر)
         cat << 'EOF' > app/src/main/java/com/bikemic/app/MainActivity.kt
         package com.bikemic.app
 
@@ -270,7 +265,6 @@ jobs:
                 label = "PTTColor"
             )
 
-            // إعداد دفق الصوت الحي والمباشر عبر UDP (منخفض التأخير Low-Latency)
             LaunchedEffect(isTransmitting) {
                 if (isTransmitting) {
                     withContext(Dispatchers.IO) {
@@ -309,7 +303,6 @@ jobs:
                 }
             }
 
-            // استقبال الصوت الحي بشكل دائم ومستمر بدون تقطيع
             DisposableEffect(Unit) {
                 val sampleRate = 8000
                 val channelConfig = AudioFormat.CHANNEL_OUT_MONO
@@ -389,7 +382,6 @@ jobs:
 
                     Spacer(modifier = Modifier.height(50.dp))
 
-                    // زر البرقية (PTT) - اضغط باستمرار للتحدث بشكل مباشر
                     Box(
                         modifier = Modifier
                             .size(230.dp)
@@ -454,7 +446,6 @@ jobs:
         }
         EOF
 
-        # ملفات مساعدة للتهيئة
         mkdir -p app/src/main/res/mipmap-anydpi-v26
         echo '<resources></resources>' > app/src/main/res/values/strings.xml
         echo '<resources></resources>' > app/src/main/res/values/styles.xml
