@@ -147,19 +147,9 @@ jobs:
 
         cat << 'EOF' > build.gradle
         buildscript {
-            repositories {
-                google()
-                mavenCentral()
-            }
             dependencies {
                 classpath 'com.android.tools.build:gradle:8.2.0'
                 classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22"
-            }
-        }
-        allprojects {
-            repositories {
-                google()
-                mavenCentral()
             }
         }
         task clean(type: Delete) {
@@ -176,7 +166,7 @@ jobs:
             }
         }
         dependencyResolutionManagement {
-            repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+            repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
             repositories {
                 google()
                 mavenCentral()
@@ -186,7 +176,7 @@ jobs:
         include ':app'
         EOF
 
-        # توليد مفتاح التوقيع مباشرة داخل السكربت باستخدام كلمة المرور الخاصة بك
+        # توليد مفتاح التوقيع الثابت والتلقائي
         cd app
         keytool -genkey -v -keystore bike.keystore -alias bikekey -keyalg RSA -keysize 2048 -validity 10000 -storepass adballah05021996 -keypass adballah05021996 -dname "CN=Abdullah, OU=BikeMic, O=Oman, L=AlDhahirah, C=OM" || true
         cd ..
