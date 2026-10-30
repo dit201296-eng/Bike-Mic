@@ -39,18 +39,18 @@ jobs:
           printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 
-      - name: Decode keystore (mandatory)
-        env:
-          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      - name: Generate temporary keystore (123456)
         run: |
-          if [ -z "$KS_B64" ]; then
-            echo "::error::Missing ANDROID_KEYSTORE_BASE64 secret. Cannot sign the APK."
-            exit 1
-          fi
           mkdir -p app
-          echo "$KS_B64" | base64 -d > app/release.keystore
+          keytool -genkeypair -v \
+            -keystore app/release.keystore \
+            -storetype PKCS12 \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias bikemic \
+            -storepass 123456 -keypass 123456 \
+            -dname "CN=BikeMic, OU=Riders, O=BikeMic, L=Muscat, ST=Muscat, C=OM"
           test -s app/release.keystore
-          echo "Keystore decoded successfully."
+          echo "Temporary keystore generated."
 
       - name: Generate P2P Mesh project
         env:
@@ -117,9 +117,9 @@ jobs:
                   signingConfigs {
                       release {
                           storeFile file('release.keystore')
-                          storePassword System.getenv("KS_PASS") ?: ""
-                          keyAlias System.getenv("K_ALIAS") ?: ""
-                          keyPassword System.getenv("K_PASS") ?: ""
+                          storePassword '123456'
+                          keyAlias 'bikemic'
+                          keyPassword '123456'
                       }
                   }
 
@@ -248,7 +248,7 @@ jobs:
           """)
 
           # =========================================================
-          # 3. AndroidManifest (WiFi + Audio + Foreground)
+          # 3. AndroidManifest (WiFi + Audio)
           # =========================================================
           write("app/src/main/AndroidManifest.xml", """
               <?xml version="1.0" encoding="utf-8"?>
@@ -471,7 +471,7 @@ jobs:
           """)
 
           # =========================================================
-          # 7. MeshVoiceEngine.kt (heartbeat + audio + election)
+          # 7. MeshVoiceEngine.kt
           # =========================================================
           write("app/src/main/java/com/bikemic/app/MeshVoiceEngine.kt", """
               package com.bikemic.app
@@ -520,12 +520,10 @@ jobs:
                   @Volatile var selectAllPeers: Boolean = true
                   val allowedPeerIds: MutableSet<Long> = Collections.newSetFromMap(ConcurrentHashMap())
 
-                  // Health (updated by DeviceHealthMonitor)
                   @Volatile var batteryPct: Int = 100
                   @Volatile var isCharging: Boolean = false
                   @Volatile var thermalStatus: Int = 0
 
-                  // Compose state (observable by UI)
                   val peersVersion = mutableIntStateOf(0)
                   val connectedCount = mutableIntStateOf(0)
                   val currentHostIdState = mutableLongStateOf(selfId)
@@ -655,7 +653,6 @@ jobs:
                                   )
                                   peersMap[senderId] = peer
 
-                                  // Handshake if we haven't yet
                                   if (!handshakedPeers.contains(senderId)) {
                                       val req = JSONObject().apply {
                                           put("t", "CONNECT_REQ")
@@ -682,7 +679,6 @@ jobs:
                               "STEP_DOWN" -> {
                                   val epoch = msg.optLong("epoch", 0)
                                   if (epoch >= election.currentEpoch) {
-                                      // accept step down, wait for new host announcement
                                       statusText.value = "القائد السابق يتنازل... جارٍ انتخاب قائد جديد"
                                   }
                               }
@@ -719,7 +715,6 @@ jobs:
                                   }
                                   broadcastJson(hb)
 
-                                  // purge dead peers
                                   val now = System.currentTimeMillis()
                                   val dead = peersMap.filterValues { now - it.lastSeenMs > 8000 }.keys
                                   if (dead.isNotEmpty()) {
@@ -727,7 +722,6 @@ jobs:
                                       peersVersion.intValue += 1
                                   }
 
-                                  // count connected peers
                                   val live = peersMap.values.count { it.handshakeOk }
                                   connectedCount.intValue = live
 
@@ -764,11 +758,9 @@ jobs:
                                   }
                               }
 
-                              // After step-down, if no new host announced in 3s, force re-election
                               if (stepDownSentMs > 0 && now - stepDownSentMs > 3000) {
                                   val candidate = election.selectNewHost(peersMap.values)
                                   if (candidate != null && candidate.nodeId == selfId) {
-                                      // We're the best candidate
                                       val (newHost, newEpoch) = election.declareSelfAsHost()
                                       currentHostIdState.longValue = newHost
                                       currentEpochState.longValue = newEpoch
@@ -782,16 +774,6 @@ jobs:
                                       }
                                       broadcastJson(announce)
                                       stepDownSentMs = 0L
-                                  }
-                              }
-
-                              // If I'm not the host but I'm the best candidate, announce
-                              if (!isHost && stepDownSentMs == 0L) {
-                                  val candidate = election.selectNewHost(peersMap.values)
-                                  if (candidate != null && candidate.nodeId == selfId &&
-                                      election.currentEpoch < candidate.epoch + 1) {
-                                      // Only announce if we're clearly the best
-                                      // (Don't spam; only if we haven't recently)
                                   }
                               }
 
@@ -930,7 +912,7 @@ jobs:
           """)
 
           # =========================================================
-          # 8. MainActivity.kt (UI)
+          # 8. MainActivity.kt
           # =========================================================
           write("app/src/main/java/com/bikemic/app/MainActivity.kt", """
               package com.bikemic.app
@@ -1118,7 +1100,6 @@ jobs:
                       Modifier.fillMaxSize().background(Color.Black)
                           .padding(horizontal = 16.dp, vertical = 14.dp)
                   ) {
-                      // Top bar
                       Row(
                           Modifier.fillMaxWidth().align(Alignment.TopCenter),
                           horizontalArrangement = Arrangement.SpaceBetween,
@@ -1160,7 +1141,6 @@ jobs:
                           }
                       }
 
-                      // Center top: name + rank + leader info + status
                       Column(
                           Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(top = 56.dp),
                           horizontalAlignment = Alignment.CenterHorizontally
@@ -1212,7 +1192,6 @@ jobs:
                           }
                       }
 
-                      // Center: PTT + Mic
                       Column(
                           Modifier.align(Alignment.Center).padding(top = 60.dp),
                           horizontalAlignment = Alignment.CenterHorizontally
@@ -1268,7 +1247,6 @@ jobs:
                           )
                       }
 
-                      // Users Dialog
                       if (showUsers) {
                           AlertDialog(
                               onDismissRequest = { showUsers = false },
@@ -1335,7 +1313,6 @@ jobs:
                           )
                       }
 
-                      // Rank Dialog
                       if (showRankDlg) {
                           AlertDialog(
                               onDismissRequest = { showRankDlg = false },
@@ -1364,7 +1341,6 @@ jobs:
                           )
                       }
 
-                      // Info Dialog
                       if (showInfo) {
                           AlertDialog(
                               onDismissRequest = { showInfo = false },
@@ -1417,10 +1393,6 @@ jobs:
           python3 /tmp/gen_bikemic_p2p.py
 
       - name: Build Release APK
-        env:
-          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          K_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          K_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: Verify APK
