@@ -1,4 +1,4 @@
-name: Build BikeMic P2P Mesh APK
+name: Build BikeMic P2P Mesh APK (Diagnostics)
 
 on:
   push:
@@ -52,7 +52,7 @@ jobs:
           test -s app/release.keystore
           echo "Temporary keystore generated."
 
-      - name: Generate P2P Mesh project
+      - name: Generate P2P Mesh project with Diagnostics
         env:
           RUN_NUM: ${{ github.run_number }}
         run: |
@@ -148,7 +148,7 @@ jobs:
                   }
                   kotlinOptions { jvmTarget = '17' }
                   buildFeatures { compose true }
-                  composeOptions { kotlinCompilerExtensionVersion '1.5.10' }
+                  composeOptions { kotlinCompilerExtensionVersion = '1.5.10' }
                   packaging {
                       resources {
                           excludes += '/META-INF/{AL2.0,LGPL2.1}'
@@ -471,7 +471,7 @@ jobs:
           """)
 
           # =========================================================
-          # 7. MeshVoiceEngine.kt
+          # 7. MeshVoiceEngine.kt (Updated with diagnostics)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/MeshVoiceEngine.kt", """
               package com.bikemic.app
@@ -532,6 +532,10 @@ jobs:
                   val activeSpeakerName = mutableStateOf<String?>(null)
                   val leaderChangeEvent = mutableStateOf<String?>(null)
 
+                  // Diagnostics
+                  val debugSentCount = mutableIntStateOf(0)
+                  val debugReceivedCount = mutableIntStateOf(0)
+
                   val peersMap = ConcurrentHashMap<Long, PeerInfo>()
                   private val handshakedPeers = Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
                   private val seenAudio = Collections.synchronizedMap(
@@ -585,20 +589,77 @@ jobs:
                       peersVersion.intValue += 1
                   }
 
-                  private fun getBroadcastAddresses(): List<InetAddress> {
-                      val list = mutableListOf<InetAddress>()
+                  fun getDebugInterfaces(): List<Pair<String, String>> {
+                      val list = mutableListOf<Pair<String, String>>()
                       runCatching {
                           val ifaces = NetworkInterface.getNetworkInterfaces()
                           while (ifaces.hasMoreElements()) {
                               val nif = ifaces.nextElement()
                               if (!nif.isUp || nif.isLoopback) continue
-                              val n = nif.name.lowercase()
-                              if (!n.startsWith("wlan") && !n.startsWith("ap") && !n.startsWith("eth")) continue
-                              for (ia in nif.interfaceAddresses) ia.broadcast?.let { list.add(it) }
+                              val name = nif.name.lowercase()
+                              if (name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("pdp")) continue
+                              for (ia in nif.interfaceAddresses) {
+                                  if (ia.address is java.net.Inet4Address) {
+                                      list.add(nif.name to (ia.address.hostAddress ?: ""))
+                                  }
+                              }
                           }
                       }
-                      if (list.isEmpty()) runCatching { list.add(InetAddress.getByName("255.255.255.255")) }
-                      return list.distinct()
+                      return list
+                  }
+
+                  fun getDebugBroadcasts(): List<String> {
+                      return getBroadcastAddresses().mapNotNull { it.hostAddress }
+                  }
+
+                  private fun getBroadcastAddresses(): List<InetAddress> {
+                      val set = mutableSetOf<InetAddress>()
+                      runCatching {
+                          val ifaces = NetworkInterface.getNetworkInterfaces()
+                          while (ifaces.hasMoreElements()) {
+                              val nif = ifaces.nextElement()
+                              if (!nif.isUp || nif.isLoopback) continue
+                              val name = nif.name.lowercase()
+                              if (name.startsWith("rmnet") || name.startsWith("ccmni") ||
+                                  name.startsWith("pdp") || name.startsWith("dummy") ||
+                                  name.startsWith("tun") || name.startsWith("ppp")) continue
+
+                              for (ia in nif.interfaceAddresses) {
+                                  if (ia.address is java.net.Inet4Address) {
+                                      ia.broadcast?.let { set.add(it) }
+                                      val prefix = ia.networkPrefixLength
+                                      if (prefix in 1..31) {
+                                          val ipBytes = ia.address.address
+                                          val ipInt = ((ipBytes[0].toInt() and 0xFF) shl 24) or
+                                                      ((ipBytes[1].toInt() and 0xFF) shl 16) or
+                                                      ((ipBytes[2].toInt() and 0xFF) shl 8) or
+                                                      (ipBytes[3].toInt() and 0xFF)
+                                          val mask = -1 shl (32 - prefix)
+                                          val bcastInt = (ipInt and mask) or mask.inv()
+                                          val bcast = byteArrayOf(
+                                              (bcastInt ushr 24).toByte(),
+                                              (bcastInt ushr 16).toByte(),
+                                              (bcastInt ushr 8).toByte(),
+                                              bcastInt.toByte()
+                                          )
+                                          runCatching { set.add(InetAddress.getByAddress(bcast)) }
+                                      }
+                                      val ipStr = ia.address.hostAddress ?: ""
+                                      if (ipStr.startsWith("192.168.") || ipStr.startsWith("172.") || ipStr.startsWith("10.")) {
+                                          val parts = ipStr.split(".")
+                                          if (parts.size == 4) {
+                                              val prefix3 = "${parts[0]}.${parts[1]}.${parts[2]}"
+                                              listOf("1", "2").forEach { last ->
+                                                  runCatching { set.add(InetAddress.getByName("$prefix3.$last")) }
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      runCatching { set.add(InetAddress.getByName("255.255.255.255")) }
+                      return set.toList()
                   }
 
                   private fun broadcastJson(obj: JSONObject) {
@@ -607,6 +668,7 @@ jobs:
                       for (b in getBroadcastAddresses()) {
                           runCatching {
                               sock.send(DatagramPacket(data, data.size, b, DISCOVERY_PORT))
+                              debugSentCount.intValue += 1
                           }
                       }
                   }
@@ -630,6 +692,7 @@ jobs:
                   }
 
                   private fun handleDiscoveryPacket(pkt: DatagramPacket) {
+                      debugReceivedCount.intValue += 1
                       runCatching {
                           val text = String(pkt.data, 0, pkt.length, Charsets.UTF_8)
                           val msg = JSONObject(text)
@@ -731,7 +794,8 @@ jobs:
                                       statusText.value = "لا يوجد دراجون متصلون بعد (شارك الواي فاي/الهوتسبوت)"
                                   }
                               }
-                              delay(2000)
+                              // Jitter to prevent broadcast collision
+                              delay(1500L + Random.nextLong(0, 500))
                           }
                       }
                   }
@@ -912,7 +976,7 @@ jobs:
           """)
 
           # =========================================================
-          # 8. MainActivity.kt
+          # 8. MainActivity.kt (Updated with Diagnostics UI)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/MainActivity.kt", """
               package com.bikemic.app
@@ -1082,6 +1146,8 @@ jobs:
                   val speaker by engine.activeSpeakerName
                   val hostId by engine.currentHostIdState
                   val epoch by engine.currentEpochState
+                  val sent by engine.debugSentCount
+                  val received by engine.debugReceivedCount
 
                   LaunchedEffect(ver) {
                       val list = engine.peersMap.values.sortedBy { it.chainRank }
@@ -1123,7 +1189,7 @@ jobs:
                               IconButton(onClick = { showInfo = true }) {
                                   Icon(
                                       Icons.Default.Info,
-                                      contentDescription = "معلومات",
+                                      contentDescription = "معلومات وتشخيص",
                                       tint = if (isHost) Color(0xFFFFD60A) else Color(0xFF8E8E93)
                                   )
                               }
@@ -1341,30 +1407,42 @@ jobs:
                           )
                       }
 
+                      // شاشة التشخيص الجديدة
                       if (showInfo) {
                           AlertDialog(
                               onDismissRequest = { showInfo = false },
                               containerColor = Color(0xFF1C1C1E),
-                              title = { Text("معلومات الشبكة", color = Color.White, fontWeight = FontWeight.Bold) },
+                              title = { Text("تشخيص الشبكة", color = Color.White, fontWeight = FontWeight.Bold) },
                               text = {
                                   Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                       Text("معرفك: ${engine.selfId}", color = Color.Gray, fontSize = 11.sp)
-                                      Text("القائد الحالي: ${if (isHost) "أنت" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")}", color = Color.White)
+                                      Text("القائد: ${if (isHost) "أنت" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")}", color = Color.White)
                                       Text("Epoch: $epoch", color = Color.Gray, fontSize = 12.sp)
-                                      Text("الدراجون المتصلون فعلياً: ${peers.count { it.handshakeOk }}", color = Color.White)
                                       HorizontalDivider(color = Color.DarkGray)
-                                      Text("حالتك:", color = Color.Gray, fontSize = 12.sp)
-                                      Text("• بطارية: ${engine.batteryPct}%${if (engine.isCharging) " (تشحن)" else ""}", color = Color.White, fontSize = 13.sp)
-                                      Text("• حرارة: ${thermalLabel(engine.thermalStatus)}", color = Color.White, fontSize = 13.sp)
-                                      Spacer(Modifier.height(6.dp))
+                                      Text("واجهات شبكتك:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                      val ifaces = remember { engine.getDebugInterfaces() }
+                                      if (ifaces.isEmpty()) {
+                                          Text("لا توجد واجهات نشطة!", color = Color.Red, fontSize = 12.sp)
+                                      } else {
+                                          ifaces.forEach { (name, ip) ->
+                                              Text("• $name: $ip", color = Color.White, fontSize = 12.sp)
+                                          }
+                                      }
+                                      HorizontalDivider(color = Color.DarkGray)
+                                      Text("عناوين البث المستخدمة:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                      val bcasts = remember { engine.getDebugBroadcasts() }
+                                      bcasts.forEach { b ->
+                                          Text("• $b", color = Color.White, fontSize = 12.sp)
+                                      }
+                                      HorizontalDivider(color = Color.DarkGray)
+                                      Text("إحصائيات:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                      Text("• حزم أُرسلت: $sent", color = Color.White, fontSize = 12.sp)
+                                      Text("• حزم مستلمة: $received", color = Color.White, fontSize = 12.sp)
+                                      Text("• أقران مكتشفون: ${peers.size}", color = Color.White, fontSize = 12.sp)
+                                      Spacer(Modifier.height(8.dp))
                                       Text(
-                                          "قواعد التنازل التلقائي: البطارية < 30% بدون شحن، أو الحرارة SEVERE/CRITICAL لمدة 30 ثانية متواصلة.",
+                                          "إذا كانت 'حزم أُرسلت' تتزايد لكن 'حزم مستلمة' صفر، فالمشكلة في الشبكة (عزل الأجهزة/جدار ناري). جرّب تعطيل 'عزل نقاط الاتصال' في إعدادات الهوتسبوت، أو استخدم راوتر عادي.",
                                           color = Color(0xFFFF9F0A), fontSize = 11.sp
-                                      )
-                                      Spacer(Modifier.height(6.dp))
-                                      Text(
-                                          "ملاحظة: يجب أن تكون جميع الهواتف على نفس شبكة الواي فاي أو الهوتسبوت. لا حاجة لإنترنت أو راوتر.",
-                                          color = Color.Gray, fontSize = 11.sp
                                       )
                                   }
                               },
@@ -1388,7 +1466,7 @@ jobs:
               }
           """)
 
-          print("BikeMic P2P Mesh project generated successfully.")
+          print("BikeMic P2P Mesh project with diagnostics generated successfully.")
           PYEOF
           python3 /tmp/gen_bikemic_p2p.py
 
@@ -1404,6 +1482,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BikeMic-P2P-Mesh-APK
+          name: BikeMic-P2P-Mesh-Diagnostics-APK
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 30
