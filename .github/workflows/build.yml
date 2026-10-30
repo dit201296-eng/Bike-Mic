@@ -1,4 +1,4 @@
-name: Build BikeMic LiveKit Release APK
+name: Build BikeMic P2P Mesh APK
 
 on:
   push:
@@ -34,131 +34,51 @@ jobs:
 
       - name: Prepare Android SDK
         run: |
-          rm -rf app gradle build.gradle* settings.gradle* gradlew* gradle.properties local.properties
           export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           mkdir -p "$ANDROID_SDK_ROOT/licenses"
           printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
 
-      - name: Generate 3-File LiveKit Architecture & Keystore
+      - name: Decode keystore (mandatory)
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KS_B64" ]; then
+            echo "::error::Missing ANDROID_KEYSTORE_BASE64 secret. Cannot sign the APK."
+            exit 1
+          fi
+          mkdir -p app
+          echo "$KS_B64" | base64 -d > app/release.keystore
+          test -s app/release.keystore
+          echo "Keystore decoded successfully."
+
+      - name: Generate P2P Mesh project
         env:
           RUN_NUM: ${{ github.run_number }}
-          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
-          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
-          K_ALIAS: ${{ secrets.KEY_ALIAS }}
-          K_PASS: ${{ secrets.KEY_PASSWORD }}
-          LK_URL: ${{ secrets.LIVEKIT_URL }}
-          LK_KEY: ${{ secrets.LIVEKIT_API_KEY }}
-          LK_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
         run: |
-          cat << 'PYEOF' > /tmp/gen_bikemic_livekit.py
+          cat << 'PYEOF' > /tmp/gen_bikemic_p2p.py
           import os
-          import base64
-          import subprocess
           import textwrap
-          from random import Random
 
-          os.makedirs("app/src/main/java/com/bikemic/app", exist_ok=True)
-          os.makedirs("app/src/main/res/values", exist_ok=True)
-          os.makedirs("app/src/main/res/drawable", exist_ok=True)
-          os.makedirs("app/src/main/res/mipmap-anydpi-v26", exist_ok=True)
-
-          def write_clean(path, content):
+          def write(path, content):
+              os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
               with open(path, "w", encoding="utf-8") as f:
                   f.write(textwrap.dedent(content).lstrip())
 
-          # 1. إعداد Keystore من GitHub Secrets (مع توليد حتمي احتياطي إذا لم يُضف الـ Secret بعد)
-          ks_b64 = os.environ.get("KS_B64", "").strip()
-          ks_pass = os.environ.get("KS_PASS", "").strip() or "adballah05021996"
-          k_alias = os.environ.get("K_ALIAS", "").strip() or "bikekey"
-          k_pass = os.environ.get("K_PASS", "").strip() or "adballah05021996"
-
-          lk_url = os.environ.get("LK_URL", "").strip()
-          lk_key = os.environ.get("LK_KEY", "").strip()
-          lk_secret = os.environ.get("LK_SECRET", "").strip()
-
-          if ks_b64:
-              with open("app/release.keystore", "wb") as fk:
-                  fk.write(base64.b64decode(ks_b64))
-          else:
-              rng = Random(ks_pass.encode("utf-8") + b"-bikemic-v1")
-              def is_prime(n):
-                  if n < 2 or n % 2 == 0:
-                      return n == 2
-                  d, s = n - 1, 0
-                  while d % 2 == 0:
-                      d //= 2
-                      s += 1
-                  for a in [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37]:
-                      if pow(a, d, n) == 1:
-                          continue
-                      for r in range(s):
-                          if pow(a, d * (1 << r), n) == n - 1:
-                              break
-                      else:
-                          return False
-                  return True
-
-              def get_prime(bits):
-                  while True:
-                      p = rng.getrandbits(bits) | (1 << (bits - 1)) | 1
-                      if p % 65537 != 1 and is_prime(p):
-                          return p
-
-              p = get_prime(1024)
-              q = get_prime(1024)
-              if p < q:
-                  p, q = q, p
-              n = p * q
-              e = 65537
-              phi = (p - 1) * (q - 1)
-              d = pow(e, -1, phi)
-              dmp1 = d % (p - 1)
-              dmq1 = d % (q - 1)
-              iqmp = pow(q, -1, p)
-
-              def der_len(l):
-                  if l < 128:
-                      return bytes([l])
-                  b = l.to_bytes((l.bit_length() + 7) // 8, "big")
-                  return bytes([0x80 | len(b)]) + b
-
-              def der_int(x):
-                  b = x.to_bytes(max(1, (x.bit_length() + 7) // 8), "big")
-                  if b[0] & 0x80:
-                      b = b"\x00" + b
-                  return b"\x02" + der_len(len(b)) + b
-
-              seq_body = b"".join(der_int(v) for v in [0, n, e, d, p, q, dmp1, dmq1, iqmp])
-              rsa_der = b"\x30" + der_len(len(seq_body)) + seq_body
-              pem = b"-----BEGIN RSA PRIVATE KEY-----\n" + base64.encodebytes(rsa_der) + b"-----END RSA PRIVATE KEY-----\n"
-              with open("/tmp/det.key", "wb") as fk:
-                  fk.write(pem)
-
-              subprocess.run([
-                  "openssl", "req", "-new", "-x509", "-key", "/tmp/det.key",
-                  "-out", "/tmp/det.crt", "-days", "10000",
-                  "-subj", "/CN=BikeMic/OU=Riders/O=Abdullah/C=OM",
-                  "-set_serial", "19960205"
-              ], check=True)
-
-              subprocess.run([
-                  "openssl", "pkcs12", "-export",
-                  "-in", "/tmp/det.crt", "-inkey", "/tmp/det.key",
-                  "-out", "app/release.keystore", "-name", k_alias,
-                  "-passout", f"pass:{ks_pass}"
-              ], check=True)
-
           run_num = int(os.environ.get("RUN_NUM", "1") or "1")
 
-          # 2. ملفات إعداد Gradle + مكتبة LiveKit Android SDK الرسمية
-          write_clean("gradle.properties", """
-              org.gradle.jvmargs=-Xmx3584m -Dfile.encoding=UTF-8
+          # =========================================================
+          # 1. Gradle configuration
+          # =========================================================
+          write("gradle.properties", """
+              org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
               android.useAndroidX=true
               android.nonTransitiveRClass=true
+              org.gradle.parallel=true
+              org.gradle.caching=true
           """)
 
-          write_clean("settings.gradle", """
+          write("settings.gradle", """
               pluginManagement {
                   repositories {
                       google()
@@ -171,115 +91,100 @@ jobs:
                   repositories {
                       google()
                       mavenCentral()
-                      maven { url 'https://jitpack.io' }
                   }
               }
               rootProject.name = "BikeMic"
               include ':app'
           """)
 
-          write_clean("build.gradle", """
+          write("build.gradle", """
               plugins {
                   id 'com.android.application' version '8.3.2' apply false
                   id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
               }
           """)
 
-          def esc(s):
-              return s.replace("\\", "\\\\").replace('"', '\\"')
-
-          write_clean("app/build.gradle", f"""
-              plugins {{
+          write("app/build.gradle", """
+              plugins {
                   id 'com.android.application'
                   id 'org.jetbrains.kotlin.android'
-              }}
+              }
 
-              android {{
+              android {
                   namespace 'com.bikemic.app'
                   compileSdk 34
 
-                  signingConfigs {{
-                      release {{
+                  signingConfigs {
+                      release {
                           storeFile file('release.keystore')
-                          storePassword "{esc(ks_pass)}"
-                          keyAlias "{esc(k_alias)}"
-                          keyPassword "{esc(k_pass)}"
-                      }}
-                  }}
+                          storePassword System.getenv("KS_PASS") ?: ""
+                          keyAlias System.getenv("K_ALIAS") ?: ""
+                          keyPassword System.getenv("K_PASS") ?: ""
+                      }
+                  }
 
-                  defaultConfig {{
+                  defaultConfig {
                       applicationId "com.bikemic.app"
                       minSdk 26
                       targetSdk 34
-                      versionCode {500 + run_num}
-                      versionName "2.{run_num}"
+                      versionCode VERSION_CODE
+                      versionName "VERSION_NAME"
+                  }
 
-                      buildConfigField "String", "DEFAULT_LK_URL", "\\"{esc(lk_url)}\\""
-                      buildConfigField "String", "DEFAULT_LK_KEY", "\\"{esc(lk_key)}\\""
-                      buildConfigField "String", "DEFAULT_LK_SECRET", "\\"{esc(lk_secret)}\\""
-                  }}
-
-                  buildTypes {{
-                      debug {{
+                  buildTypes {
+                      debug {
                           signingConfig signingConfigs.release
-                      }}
-                      release {{
+                      }
+                      release {
                           signingConfig signingConfigs.release
                           minifyEnabled false
                           shrinkResources false
-                          proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-                      }}
-                  }}
+                      }
+                  }
 
-                  compileOptions {{
+                  compileOptions {
                       sourceCompatibility JavaVersion.VERSION_17
                       targetCompatibility JavaVersion.VERSION_17
-                  }}
-                  kotlinOptions {{
-                      jvmTarget = '17'
-                  }}
-                  buildFeatures {{
-                      compose true
-                      buildConfig true
-                  }}
-                  composeOptions {{
-                      kotlinCompilerExtensionVersion '1.5.10'
-                  }}
-                  packaging {{
-                      resources {{
-                          excludes += '/META-INF/{{AL2.0,LGPL2.1}}'
-                      }}
-                  }}
-              }}
+                  }
+                  kotlinOptions { jvmTarget = '17' }
+                  buildFeatures { compose true }
+                  composeOptions { kotlinCompilerExtensionVersion '1.5.10' }
+                  packaging {
+                      resources {
+                          excludes += '/META-INF/{AL2.0,LGPL2.1}'
+                      }
+                  }
+              }
 
-              dependencies {{
-                  implementation 'io.livekit:livekit-android:2.5.0'
+              dependencies {
                   implementation 'androidx.core:core-ktx:1.12.0'
                   implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
+                  implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.7.0'
                   implementation 'androidx.activity:activity-compose:1.8.2'
                   implementation platform('androidx.compose:compose-bom:2024.02.02')
                   implementation 'androidx.compose.ui:ui'
                   implementation 'androidx.compose.ui:ui-graphics'
                   implementation 'androidx.compose.material3:material3'
                   implementation 'androidx.compose.material:material-icons-extended'
-              }}
+                  implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+              }
+          """.replace("VERSION_CODE", str(500 + run_num)).replace("VERSION_NAME", f"3.{run_num}"))
+
+          write("app/proguard-rules.pro", """
+              -keep class com.bikemic.app.** { *; }
           """)
 
-          write_clean("app/proguard-rules.pro", """
-              -keep class io.livekit.** { *; }
-              -keep class livekit.** { *; }
-              -keep class org.webrtc.** { *; }
-          """)
-
-          # 3. الموارد وأيقونة BikeMic
-          write_clean("app/src/main/res/values/strings.xml", """
+          # =========================================================
+          # 2. Resources & Icon
+          # =========================================================
+          write("app/src/main/res/values/strings.xml", """
               <?xml version="1.0" encoding="utf-8"?>
               <resources>
                   <string name="app_name">BikeMic</string>
               </resources>
           """)
 
-          write_clean("app/src/main/res/values/styles.xml", """
+          write("app/src/main/res/values/styles.xml", """
               <?xml version="1.0" encoding="utf-8"?>
               <resources>
                   <style name="Theme.BikeMic" parent="android:Theme.Material.NoActionBar">
@@ -290,25 +195,21 @@ jobs:
               </resources>
           """)
 
-          write_clean("app/src/main/res/drawable/ic_launcher_background.xml", """
+          write("app/src/main/res/drawable/ic_launcher_background.xml", """
               <?xml version="1.0" encoding="utf-8"?>
               <vector xmlns:android="http://schemas.android.com/apk/res/android"
-                  android:width="108dp"
-                  android:height="108dp"
-                  android:viewportWidth="108"
-                  android:viewportHeight="108">
+                  android:width="108dp" android:height="108dp"
+                  android:viewportWidth="108" android:viewportHeight="108">
                   <path android:fillColor="#0B0B0B" android:pathData="M0,0h108v108h-108z"/>
                   <path android:fillColor="#181818" android:pathData="M54,54m-46,0a46,46 0,1 1,92 0a46,46 0,1 1,-92 0"/>
               </vector>
           """)
 
-          write_clean("app/src/main/res/drawable/ic_launcher_foreground.xml", """
+          write("app/src/main/res/drawable/ic_launcher_foreground.xml", """
               <?xml version="1.0" encoding="utf-8"?>
               <vector xmlns:android="http://schemas.android.com/apk/res/android"
-                  android:width="108dp"
-                  android:height="108dp"
-                  android:viewportWidth="108"
-                  android:viewportHeight="108">
+                  android:width="108dp" android:height="108dp"
+                  android:viewportWidth="108" android:viewportHeight="108">
                   <path android:fillColor="#FFFFFF" android:pathData="M51,21h6l2,5h-10z"/>
                   <path android:strokeColor="#E0E0E0" android:strokeWidth="2.2" android:pathData="M44,24.5 L64,24.5"/>
                   <path android:fillColor="#FFEB3B" android:pathData="M54,28m-3.2,0a3.2,3.2 0,1 1,6.4 0a3.2,3.2 0,1 1,-6.4 0"/>
@@ -330,7 +231,7 @@ jobs:
               </vector>
           """)
 
-          write_clean("app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml", """
+          write("app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml", """
               <?xml version="1.0" encoding="utf-8"?>
               <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
                   <background android:drawable="@drawable/ic_launcher_background"/>
@@ -338,7 +239,7 @@ jobs:
               </adaptive-icon>
           """)
 
-          write_clean("app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml", """
+          write("app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml", """
               <?xml version="1.0" encoding="utf-8"?>
               <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
                   <background android:drawable="@drawable/ic_launcher_background"/>
@@ -346,17 +247,23 @@ jobs:
               </adaptive-icon>
           """)
 
-          # 4. AndroidManifest.xml (حُذفت أذونات الواي فاي المحلية والموقع وأُبقيت أذونات الصوت والإنترنت النظيفة)
-          write_clean("app/src/main/AndroidManifest.xml", """
+          # =========================================================
+          # 3. AndroidManifest (WiFi + Audio + Foreground)
+          # =========================================================
+          write("app/src/main/AndroidManifest.xml", """
               <?xml version="1.0" encoding="utf-8"?>
               <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
                   <uses-permission android:name="android.permission.INTERNET" />
                   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+                  <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+                  <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+                  <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+                  <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+                      android:usesPermissionFlags="neverForLocation" />
+                  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
                   <uses-permission android:name="android.permission.RECORD_AUDIO" />
                   <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-                  <uses-permission android:name="android.permission.BLUETOOTH" />
-                  <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
                   <uses-permission android:name="android.permission.WAKE_LOCK" />
 
                   <application
@@ -380,459 +287,652 @@ jobs:
               </manifest>
           """)
 
-          # =========================================================================
-          # الملف الأول (1/3): LiveKitTokenGenerator.kt - توليد JWT أصلي بدون خادم وسيط
-          # =========================================================================
-          write_clean("app/src/main/java/com/bikemic/app/LiveKitTokenGenerator.kt", """
+          # =========================================================
+          # 4. Models.kt
+          # =========================================================
+          write("app/src/main/java/com/bikemic/app/Models.kt", """
               package com.bikemic.app
 
-              import android.util.Base64
-              import org.json.JSONObject
-              import javax.crypto.Mac
-              import javax.crypto.spec.SecretKeySpec
+              data class PeerInfo(
+                  val nodeId: Long,
+                  val name: String,
+                  val chainRank: Int,
+                  val batteryPct: Int,
+                  val isCharging: Boolean,
+                  val thermalStatus: Int,
+                  val epoch: Long,
+                  val currentHostId: Long,
+                  val ipAddress: String,
+                  val lastSeenMs: Long,
+                  val handshakeOk: Boolean
+              )
+          """)
 
-              object LiveKitTokenGenerator {
+          # =========================================================
+          # 5. DeviceHealthMonitor.kt
+          # =========================================================
+          write("app/src/main/java/com/bikemic/app/DeviceHealthMonitor.kt", """
+              package com.bikemic.app
 
-                  fun createToken(
-                      apiKey: String,
-                      apiSecret: String,
-                      roomName: String,
-                      identity: String,
-                      displayName: String,
-                      metadata: String
-                  ): String {
-                      val nowSec = System.currentTimeMillis() / 1000L
-                      val expSec = nowSec + 86400L // صالح لمدة 24 ساعة متواصلة
+              import android.content.BroadcastReceiver
+              import android.content.Context
+              import android.content.Intent
+              import android.content.IntentFilter
+              import android.os.BatteryManager
+              import android.os.Build
+              import android.os.PowerManager
 
-                      val header = JSONObject().apply {
-                          put("alg", "HS256")
-                          put("typ", "JWT")
-                      }
-
-                      val videoGrant = JSONObject().apply {
-                          put("roomJoin", true)
-                          put("room", roomName)
-                          put("canPublish", true)
-                          put("canSubscribe", true)
-                          put("canPublishData", true)
-                      }
-
-                      val payload = JSONObject().apply {
-                          put("iss", apiKey.trim())
-                          put("sub", identity)
-                          put("name", displayName)
-                          put("metadata", metadata)
-                          put("nbf", nowSec - 10)
-                          put("iat", nowSec)
-                          put("exp", expSec)
-                          put("video", videoGrant)
-                      }
-
-                      val headerB64 = base64UrlEncode(header.toString().toByteArray(Charsets.UTF_8))
-                      val payloadB64 = base64UrlEncode(payload.toString().toByteArray(Charsets.UTF_8))
-                      val signingInput = "$headerB64.$payloadB64"
-                      val signatureB64 = hmacSha256(signingInput, apiSecret.trim())
-
-                      return "$signingInput.$signatureB64"
+              class DeviceHealthMonitor(
+                  private val context: Context,
+                  private val onUpdate: (batteryPct: Int, isCharging: Boolean, thermal: Int) -> Unit
+              ) {
+                  companion object {
+                      const val THERMAL_NONE = 0
+                      const val THERMAL_LIGHT = 1
+                      const val THERMAL_MODERATE = 2
+                      const val THERMAL_SEVERE = 3
+                      const val THERMAL_CRITICAL = 4
                   }
 
-                  private fun base64UrlEncode(bytes: ByteArray): String {
-                      return Base64.encodeToString(
-                          bytes,
-                          Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
-                      )
+                  @Volatile var batteryPct: Int = 100
+                      private set
+                  @Volatile var isCharging: Boolean = false
+                      private set
+                  @Volatile var thermalStatus: Int = THERMAL_NONE
+                      private set
+
+                  private var batteryReceiver: BroadcastReceiver? = null
+                  private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
+                  private var powerManager: PowerManager? = null
+
+                  fun start() {
+                      batteryReceiver = object : BroadcastReceiver() {
+                          override fun onReceive(ctx: Context?, intent: Intent?) {
+                              intent ?: return
+                              val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                              val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+                              if (level < 0 || scale <= 0) return
+                              batteryPct = (level * 100f / scale).toInt()
+                              val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+                              isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                                           status == BatteryManager.BATTERY_STATUS_FULL
+                              onUpdate(batteryPct, isCharging, thermalStatus)
+                          }
+                      }
+                      context.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                          powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+                          thermalListener = PowerManager.OnThermalStatusChangedListener { sys ->
+                              thermalStatus = mapSysThermal(sys)
+                              onUpdate(batteryPct, isCharging, thermalStatus)
+                          }
+                          powerManager?.addThermalStatusListener(context.mainExecutor, thermalListener!!)
+                      }
                   }
 
-                  private fun hmacSha256(data: String, secret: String): String {
-                      val mac = Mac.getInstance("HmacSHA256")
-                      val keySpec = SecretKeySpec(secret.toByteArray(Charsets.UTF_8), "HmacSHA256")
-                      mac.init(keySpec)
-                      return base64UrlEncode(mac.doFinal(data.toByteArray(Charsets.UTF_8)))
+                  private fun mapSysThermal(sys: Int): Int = when (sys) {
+                      PowerManager.THERMAL_STATUS_NONE -> THERMAL_NONE
+                      PowerManager.THERMAL_STATUS_LIGHT -> THERMAL_LIGHT
+                      PowerManager.THERMAL_STATUS_MODERATE -> THERMAL_MODERATE
+                      PowerManager.THERMAL_STATUS_SEVERE -> THERMAL_SEVERE
+                      else -> THERMAL_CRITICAL
+                  }
+
+                  fun stop() {
+                      runCatching { batteryReceiver?.let { context.unregisterReceiver(it) } }
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                          runCatching {
+                              thermalListener?.let { powerManager?.removeThermalStatusListener(it) }
+                          }
+                      }
                   }
               }
           """)
 
-          # =========================================================================
-          # الملف الثاني (2/3): LiveKitVoiceEngine.kt - محرك WebRTC + Jitter Buffer + PING/PONG
-          # =========================================================================
-          write_clean("app/src/main/java/com/bikemic/app/LiveKitVoiceEngine.kt", """
+          # =========================================================
+          # 6. LeaderElection.kt
+          # =========================================================
+          write("app/src/main/java/com/bikemic/app/LeaderElection.kt", """
+              package com.bikemic.app
+
+              class LeaderElection(
+                  private val selfId: Long,
+                  private val minBattery: Int = 30,
+                  private val thermalHoldMs: Long = 30_000L
+              ) {
+                  @Volatile var currentHostId: Long = selfId
+                      private set
+                  @Volatile var currentEpoch: Long = 0L
+                      private set
+
+                  private var thermalHighSinceMs: Long = 0L
+                  private var lowBatSinceMs: Long = 0L
+
+                  fun healthScore(p: PeerInfo): Double {
+                      var s = p.batteryPct.toDouble()
+                      when (p.thermalStatus) {
+                          DeviceHealthMonitor.THERMAL_CRITICAL -> return -1000.0
+                          DeviceHealthMonitor.THERMAL_SEVERE -> s -= 60.0
+                          DeviceHealthMonitor.THERMAL_MODERATE -> s -= 30.0
+                          DeviceHealthMonitor.THERMAL_LIGHT -> s -= 8.0
+                      }
+                      if (p.isCharging) s += 20.0
+                      return s
+                  }
+
+                  fun shouldStepDown(bat: Int, chg: Boolean, thermal: Int, nowMs: Long): Boolean {
+                      if (currentHostId != selfId) return false
+                      if (thermal >= DeviceHealthMonitor.THERMAL_SEVERE) {
+                          if (thermalHighSinceMs == 0L) thermalHighSinceMs = nowMs
+                          if (nowMs - thermalHighSinceMs >= thermalHoldMs) return true
+                      } else {
+                          thermalHighSinceMs = 0L
+                      }
+                      if (bat < minBattery && !chg) {
+                          if (lowBatSinceMs == 0L) lowBatSinceMs = nowMs
+                          if (nowMs - lowBatSinceMs >= thermalHoldMs) return true
+                      } else {
+                          lowBatSinceMs = 0L
+                      }
+                      return false
+                  }
+
+                  fun selectNewHost(peers: Collection<PeerInfo>): PeerInfo? {
+                      if (peers.isEmpty()) return null
+                      return peers
+                          .asSequence()
+                          .filter { it.nodeId != selfId }
+                          .filter { it.thermalStatus < DeviceHealthMonitor.THERMAL_CRITICAL }
+                          .sortedWith(
+                              compareByDescending<PeerInfo> { healthScore(it) }
+                                  .thenByDescending { it.epoch }
+                                  .thenBy { it.nodeId }
+                          )
+                          .firstOrNull()
+                  }
+
+                  fun acceptHostAnnouncement(hostId: Long, epoch: Long): Boolean {
+                      if (epoch > currentEpoch ||
+                          (epoch == currentEpoch && hostId < currentHostId)) {
+                          currentHostId = hostId
+                          currentEpoch = epoch
+                          return true
+                      }
+                      return false
+                  }
+
+                  fun declareSelfAsHost(): Pair<Long, Long> {
+                      currentHostId = selfId
+                      currentEpoch += 1
+                      return selfId to currentEpoch
+                  }
+              }
+          """)
+
+          # =========================================================
+          # 7. MeshVoiceEngine.kt (heartbeat + audio + election)
+          # =========================================================
+          write("app/src/main/java/com/bikemic/app/MeshVoiceEngine.kt", """
               package com.bikemic.app
 
               import android.content.Context
+              import android.media.AudioAttributes
+              import android.media.AudioFormat
               import android.media.AudioManager
+              import android.media.AudioRecord
+              import android.media.AudioTrack
+              import android.media.MediaRecorder
+              import android.media.audiofx.AcousticEchoCanceler
+              import android.media.audiofx.NoiseSuppressor
+              import android.net.wifi.WifiManager
               import androidx.compose.runtime.mutableIntStateOf
               import androidx.compose.runtime.mutableLongStateOf
               import androidx.compose.runtime.mutableStateOf
-              import io.livekit.android.AudioOptions
-              import io.livekit.android.AudioType
-              import io.livekit.android.ConnectOptions
-              import io.livekit.android.LiveKit
-              import io.livekit.android.LiveKitOverrides
-              import io.livekit.android.events.RoomEvent
-              import io.livekit.android.events.collect
-              import io.livekit.android.room.Room
-              import io.livekit.android.room.participant.DataPublishReliability
-              import io.livekit.android.room.participant.Participant
-              import io.livekit.android.room.participant.RemoteParticipant
-              import io.livekit.android.room.track.AudioTrackPublishOptions
-              import io.livekit.android.room.track.LocalAudioTrackOptions
-              import io.livekit.android.room.track.RemoteAudioTrack
               import kotlinx.coroutines.*
               import org.json.JSONObject
+              import java.net.DatagramPacket
+              import java.net.DatagramSocket
+              import java.net.InetAddress
+              import java.net.InetSocketAddress
+              import java.net.NetworkInterface
+              import java.nio.ByteBuffer
               import java.util.Collections
-              import java.util.UUID
               import java.util.concurrent.ConcurrentHashMap
-              import kotlin.math.abs
-              import kotlin.math.roundToInt
+              import java.util.concurrent.atomic.AtomicInteger
+              import kotlin.random.Random
 
-              data class RiderPeer(
-                  val identity: String,
-                  val name: String,
-                  val chainRank: Int,
-                  val rttMs: Long,
-                  val isSpeaking: Boolean,
-                  val lastPongAt: Long
-              )
+              class MeshVoiceEngine(private val context: Context) {
 
-              class LiveKitVoiceEngine(private val context: Context) {
+                  companion object {
+                      private const val DISCOVERY_PORT = 50004
+                      private const val AUDIO_PORT = 50005
+                      private const val SAMPLE_RATE = 16000
+                      private const val FRAME_BYTES = 640
+                      private const val MAGIC_AUDIO: Byte = 0x42
+                  }
 
-                  val localIdentity: String = "rider-" + UUID.randomUUID().toString().take(8)
+                  val selfId: Long = Random.nextLong(1, Long.MAX_VALUE)
                   @Volatile var userName: String = "أبو ناصر"
                   @Volatile var chainRank: Int = 1
                   @Volatile var isPttPressed: Boolean = false
                   @Volatile var isOpenMicOn: Boolean = false
                   @Volatile var selectAllPeers: Boolean = true
-                  val allowedPeerIds: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
+                  val allowedPeerIds: MutableSet<Long> = Collections.newSetFromMap(ConcurrentHashMap())
 
-                  // Jitter Buffer التكيّفي ومقاييس PING / PONG
-                  @Volatile var targetJitterMs: Int = 60 // 60ms مثالي للدراجات على 4G/5G لمنع التقطيع
-                  val measuredRttMs = mutableLongStateOf(0L)
-                  val measuredJitterMs = mutableLongStateOf(0L)
-                  val pongCounter = mutableIntStateOf(0)
-                  val connectionStateText = mutableStateOf("غير متصل - اضغط أيقونة السحابة لإعداد الغرفة")
-                  val isConnected = mutableStateOf(false)
+                  // Health (updated by DeviceHealthMonitor)
+                  @Volatile var batteryPct: Int = 100
+                  @Volatile var isCharging: Boolean = false
+                  @Volatile var thermalStatus: Int = 0
+
+                  // Compose state (observable by UI)
+                  val peersVersion = mutableIntStateOf(0)
+                  val connectedCount = mutableIntStateOf(0)
+                  val currentHostIdState = mutableLongStateOf(selfId)
+                  val currentEpochState = mutableLongStateOf(0L)
+                  val statusText = mutableStateOf("جارٍ البحث عن دراجين آخرين...")
                   val activeSpeakerName = mutableStateOf<String?>(null)
+                  val leaderChangeEvent = mutableStateOf<String?>(null)
 
-                  val peersMap = ConcurrentHashMap<String, RiderPeer>()
-                  private val peerRttMap = ConcurrentHashMap<String, Long>()
-                  private val peerPongMap = ConcurrentHashMap<String, Long>()
-
-                  private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-                  private var room: Room? = null
-                  private var connectJob: Job? = null
-                  private var pingPongJob: Job? = null
-                  private var lastRttSample: Long = 0L
-
-                  fun connectToLiveKit(
-                      wsUrl: String,
-                      apiKey: String,
-                      apiSecret: String,
-                      roomName: String
-                  ) {
-                      if (wsUrl.isBlank() || apiKey.isBlank() || apiSecret.isBlank()) {
-                          connectionStateText.value = "بانتظار مفاتيح LiveKit (اضغط السحابة بالأعلى)"
-                          isConnected.value = false
-                          return
+                  val peersMap = ConcurrentHashMap<Long, PeerInfo>()
+                  private val handshakedPeers = Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
+                  private val seenAudio = Collections.synchronizedMap(
+                      object : LinkedHashMap<Long, Boolean>(512, 0.75f, true) {
+                          override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Boolean>?) = size > 600
                       }
+                  )
 
-                      connectJob?.cancel()
-                      connectJob = scope.launch {
-                          disconnectCurrentRoom()
-                          connectionStateText.value = "جاري الاتصال بسحابة LiveKit..."
+                  private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+                  private val seqCounter = AtomicInteger(1)
 
-                          try {
-                              val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                              audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                              audioManager.isSpeakerphoneOn = true
+                  private val election = LeaderElection(selfId)
+                  private var multicastLock: WifiManager.MulticastLock? = null
+                  private var discoverySocket: DatagramSocket? = null
+                  private var audioSocket: DatagramSocket? = null
 
-                              // تهيئة LiveKit مع تفعيل معالجة الصوت العتادية ومخزن الاهتزاز WebRTC NetEQ Jitter Buffer
-                              val newRoom = LiveKit.create(
-                                  appContext = context.applicationContext,
-                                  overrides = LiveKitOverrides(
-                                      audioOptions = AudioOptions(
-                                          audioOutputType = AudioType.MediaAudioType()
-                                      )
-                                  )
-                              )
-                              room = newRoom
+                  fun start() {
+                      val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                      multicastLock = wifi.createMulticastLock("BikeMicP2P").apply {
+                          setReferenceCounted(true)
+                          acquire()
+                      }
+                      val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                      am.mode = AudioManager.MODE_IN_COMMUNICATION
+                      am.isSpeakerphoneOn = true
 
-                              // مراقبة أحداث الغرفة (دخول/خروج الدراجين، المتحدثين النشطين، وحزم PING/PONG)
-                              launch {
-                                  newRoom.events.collect { event ->
-                                      when (event) {
-                                          is RoomEvent.Connected -> {
-                                              isConnected.value = true
-                                              connectionStateText.value = "متصل بغرفة ($roomName)"
-                                              syncParticipants()
-                                              updateMicState()
-                                          }
-                                          is RoomEvent.Reconnecting -> {
-                                              connectionStateText.value = "جاري استعادة الإشارة تلقائياً..."
-                                          }
-                                          is RoomEvent.Reconnected -> {
-                                              isConnected.value = true
-                                              connectionStateText.value = "متصل بغرفة ($roomName)"
-                                              syncParticipants()
-                                              updateMicState()
-                                          }
-                                          is RoomEvent.Disconnected -> {
-                                              isConnected.value = false
-                                              connectionStateText.value = "انقطع الاتصال - جاري إعادة المحاولة..."
-                                          }
-                                          is RoomEvent.ParticipantConnected,
-                                          is RoomEvent.ParticipantDisconnected,
-                                          is RoomEvent.ParticipantMetadataChanged,
-                                          is RoomEvent.TrackSubscribed,
-                                          is RoomEvent.TrackUnsubscribed -> {
-                                              syncParticipants()
-                                              applySelectiveAudioRouting()
-                                          }
-                                          is RoomEvent.ActiveSpeakersChanged -> {
-                                              updateActiveSpeaker(event.speakers)
-                                              syncParticipants()
-                                          }
-                                          is RoomEvent.DataReceived -> {
-                                              handlePingPongPacket(event.data, event.participant)
-                                          }
-                                          else -> {}
-                                      }
-                                  }
-                              }
+                      startDiscovery()
+                      startAudioReceiver()
+                      startAudioTransmitter()
+                      startHeartbeat()
+                      startElectionLoop()
+                  }
 
-                              val metaJson = JSONObject().apply {
-                                  put("rank", chainRank)
-                                  put("name", userName)
-                              }.toString()
+                  fun stop() {
+                      scope.cancel()
+                      runCatching { discoverySocket?.close() }
+                      runCatching { audioSocket?.close() }
+                      runCatching { if (multicastLock?.isHeld == true) multicastLock?.release() }
+                  }
 
-                              val jwt = withContext(Dispatchers.Default) {
-                                  LiveKitTokenGenerator.createToken(
-                                      apiKey = apiKey,
-                                      apiSecret = apiSecret,
-                                      roomName = roomName.ifBlank { "bikemic-oman" },
-                                      identity = localIdentity,
-                                      displayName = userName,
-                                      metadata = metaJson
-                                  )
-                              }
+                  fun updateUser(newName: String, newRank: Int) {
+                      userName = newName
+                      chainRank = newRank
+                      peersVersion.intValue += 1
+                  }
 
-                              newRoom.connect(
-                                  url = wsUrl.trim(),
-                                  token = jwt,
-                                  options = ConnectOptions(
-                                      autoSubscribe = true,
-                                      audioTrackCaptureDefaults = LocalAudioTrackOptions(
-                                          noiseSuppression = true,
-                                          echoCancellation = true,
-                                          autoGainControl = true,
-                                          highPassFilter = true
-                                      ),
-                                      audioTrackPublishDefaults = AudioTrackPublishOptions(
-                                          audioBitrate = 32_000, // Opus فائق الوضوح للصوت البشري مع استهلاك بيانات ضئيل
-                                          dtx = true,            // إيقاف إرسال الصمت لتوفير البطارية والبيانات
-                                          red = true             // Redundant Audio Data لحماية الصوت من تقطيع الشبكة مع Jitter Buffer
-                                      )
-                                  )
-                              )
+                  fun updateHealth(bat: Int, chg: Boolean, thermal: Int) {
+                      batteryPct = bat
+                      isCharging = chg
+                      thermalStatus = thermal
+                      peersVersion.intValue += 1
+                  }
 
-                              startPingPongLoop()
-                          } catch (e: Exception) {
-                              isConnected.value = false
-                              connectionStateText.value = "تعذر الاتصال: تأكد من الرابط والمفاتيح والإنترنت"
+                  private fun getBroadcastAddresses(): List<InetAddress> {
+                      val list = mutableListOf<InetAddress>()
+                      runCatching {
+                          val ifaces = NetworkInterface.getNetworkInterfaces()
+                          while (ifaces.hasMoreElements()) {
+                              val nif = ifaces.nextElement()
+                              if (!nif.isUp || nif.isLoopback) continue
+                              val n = nif.name.lowercase()
+                              if (!n.startsWith("wlan") && !n.startsWith("ap") && !n.startsWith("eth")) continue
+                              for (ia in nif.interfaceAddresses) ia.broadcast?.let { list.add(it) }
+                          }
+                      }
+                      if (list.isEmpty()) runCatching { list.add(InetAddress.getByName("255.255.255.255")) }
+                      return list.distinct()
+                  }
+
+                  private fun broadcastJson(obj: JSONObject) {
+                      val data = obj.toString().toByteArray(Charsets.UTF_8)
+                      val sock = discoverySocket ?: return
+                      for (b in getBroadcastAddresses()) {
+                          runCatching {
+                              sock.send(DatagramPacket(data, data.size, b, DISCOVERY_PORT))
                           }
                       }
                   }
 
-                  // حلقة PING / PONG الحقيقية عبر WebRTC DataChannel لحساب الـ RTT والـ Jitter وضمان بقاء الاتصال حياً
-                  private fun startPingPongLoop() {
-                      pingPongJob?.cancel()
-                      pingPongJob = scope.launch(Dispatchers.IO) {
-                          while (isActive) {
-                              val currentRoom = room
-                              if (currentRoom != null && isConnected.value) {
-                                  runCatching {
-                                      val pingJson = JSONObject().apply {
-                                          put("type", "PING")
-                                          put("sender", localIdentity)
-                                          put("name", userName)
-                                          put("rank", chainRank)
-                                          put("ts", System.currentTimeMillis())
-                                      }.toString().toByteArray(Charsets.UTF_8)
+                  private fun startDiscovery() {
+                      scope.launch {
+                          runCatching {
+                              discoverySocket = DatagramSocket(null).apply {
+                                  reuseAddress = true
+                                  broadcast = true
+                                  bind(InetSocketAddress(DISCOVERY_PORT))
+                              }
+                              val buf = ByteArray(1024)
+                              while (isActive) {
+                                  val pkt = DatagramPacket(buf, buf.size)
+                                  discoverySocket?.receive(pkt) ?: break
+                                  handleDiscoveryPacket(pkt)
+                              }
+                          }
+                      }
+                  }
 
-                                      currentRoom.localParticipant.publishData(
-                                          data = pingJson,
-                                          reliability = DataPublishReliability.LOSSY
-                                      )
+                  private fun handleDiscoveryPacket(pkt: DatagramPacket) {
+                      runCatching {
+                          val text = String(pkt.data, 0, pkt.length, Charsets.UTF_8)
+                          val msg = JSONObject(text)
+                          val senderId = msg.optLong("id", -1)
+                          if (senderId <= 0 || senderId == selfId) return
+
+                          when (msg.optString("t")) {
+                              "HB" -> {
+                                  val peer = PeerInfo(
+                                      nodeId = senderId,
+                                      name = msg.optString("name", "راكب"),
+                                      chainRank = msg.optInt("rank", 2),
+                                      batteryPct = msg.optInt("bat", 50),
+                                      isCharging = msg.optBoolean("chg", false),
+                                      thermalStatus = msg.optInt("thm", 0),
+                                      epoch = msg.optLong("epoch", 0),
+                                      currentHostId = msg.optLong("host", senderId),
+                                      ipAddress = pkt.address.hostAddress ?: "",
+                                      lastSeenMs = System.currentTimeMillis(),
+                                      handshakeOk = handshakedPeers.contains(senderId)
+                                  )
+                                  peersMap[senderId] = peer
+
+                                  // Handshake if we haven't yet
+                                  if (!handshakedPeers.contains(senderId)) {
+                                      val req = JSONObject().apply {
+                                          put("t", "CONNECT_REQ")
+                                          put("id", selfId)
+                                          put("name", userName)
+                                      }
+                                      broadcastJson(req)
                                   }
-                                  syncParticipants()
+                                  if (selectAllPeers) allowedPeerIds.add(senderId)
+                                  peersVersion.intValue += 1
+                              }
+                              "CONNECT_REQ" -> {
+                                  handshakedPeers.add(senderId)
+                                  val ack = JSONObject().apply {
+                                      put("t", "CONNECT_ACK")
+                                      put("id", selfId)
+                                  }
+                                  broadcastJson(ack)
+                              }
+                              "CONNECT_ACK" -> {
+                                  handshakedPeers.add(senderId)
+                                  peersVersion.intValue += 1
+                              }
+                              "STEP_DOWN" -> {
+                                  val epoch = msg.optLong("epoch", 0)
+                                  if (epoch >= election.currentEpoch) {
+                                      // accept step down, wait for new host announcement
+                                      statusText.value = "القائد السابق يتنازل... جارٍ انتخاب قائد جديد"
+                                  }
+                              }
+                              "I_AM_HOST" -> {
+                                  val newHost = msg.optLong("id", -1)
+                                  val epoch = msg.optLong("epoch", 0)
+                                  if (newHost > 0 && election.acceptHostAnnouncement(newHost, epoch)) {
+                                      currentHostIdState.longValue = election.currentHostId
+                                      currentEpochState.longValue = election.currentEpoch
+                                      val hostName = peersMap[newHost]?.name ?: "راكب"
+                                      leaderChangeEvent.value = "القائد الجديد: $hostName"
+                                      statusText.value = "متصل • القائد: $hostName"
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  private fun startHeartbeat() {
+                      scope.launch {
+                          while (isActive) {
+                              runCatching {
+                                  val hb = JSONObject().apply {
+                                      put("t", "HB")
+                                      put("id", selfId)
+                                      put("name", userName)
+                                      put("rank", chainRank)
+                                      put("bat", batteryPct)
+                                      put("chg", isCharging)
+                                      put("thm", thermalStatus)
+                                      put("epoch", election.currentEpoch)
+                                      put("host", election.currentHostId)
+                                      put("ts", System.currentTimeMillis())
+                                  }
+                                  broadcastJson(hb)
+
+                                  // purge dead peers
+                                  val now = System.currentTimeMillis()
+                                  val dead = peersMap.filterValues { now - it.lastSeenMs > 8000 }.keys
+                                  if (dead.isNotEmpty()) {
+                                      dead.forEach { peersMap.remove(it); handshakedPeers.remove(it) }
+                                      peersVersion.intValue += 1
+                                  }
+
+                                  // count connected peers
+                                  val live = peersMap.values.count { it.handshakeOk }
+                                  connectedCount.intValue = live
+
+                                  if (live > 0) {
+                                      statusText.value = "متصل • $live دراج متصل"
+                                  } else {
+                                      statusText.value = "لا يوجد دراجون متصلون بعد (شارك الواي فاي/الهوتسبوت)"
+                                  }
                               }
                               delay(2000)
                           }
                       }
                   }
 
-                  private fun handlePingPongPacket(bytes: ByteArray, sender: RemoteParticipant?) {
-                      runCatching {
-                          val msg = JSONObject(String(bytes, Charsets.UTF_8))
-                          when (msg.optString("type")) {
-                              "PING" -> {
-                                  val originId = msg.optString("sender")
-                                  val ts = msg.optLong("ts")
-                                  if (originId.isNotEmpty() && originId != localIdentity) {
-                                      val pongJson = JSONObject().apply {
-                                          put("type", "PONG")
-                                          put("target", originId)
-                                          put("responder", localIdentity)
-                                          put("ts", ts)
-                                      }.toString().toByteArray(Charsets.UTF_8)
-
-                                      scope.launch(Dispatchers.IO) {
-                                          runCatching {
-                                              room?.localParticipant?.publishData(
-                                                  data = pongJson,
-                                                  reliability = DataPublishReliability.LOSSY
-                                              )
-                                          }
-                                      }
-                                  }
-                              }
-                              "PONG" -> {
-                                  if (msg.optString("target") == localIdentity) {
-                                      val sentTs = msg.optLong("ts")
-                                      val responderId = msg.optString("responder").ifEmpty { sender?.identity?.value ?: "" }
-                                      val rtt = (System.currentTimeMillis() - sentTs).coerceAtLeast(1L)
-
-                                      // حساب تذبذب الشبكة الفعلي (RFC 3550 Jitter Estimator) وتكييف Jitter Buffer تلقائياً
-                                      if (lastRttSample > 0L) {
-                                          val delta = abs(rtt - lastRttSample)
-                                          measuredJitterMs.longValue = ((measuredJitterMs.longValue * 15L) + delta) / 16L
-                                      }
-                                      lastRttSample = rtt
-                                      measuredRttMs.longValue = rtt
-                                      pongCounter.intValue += 1
-
-                                      // ضبط حجم الـ Jitter Buffer التكيّفي تلقائياً بناءً على جودة الطريق والشبكة
-                                      targetJitterMs = (40 + (measuredJitterMs.longValue * 2).toInt()).coerceIn(40, 220)
-
-                                      if (responderId.isNotEmpty()) {
-                                          peerRttMap[responderId] = rtt
-                                          peerPongMap[responderId] = System.currentTimeMillis()
-                                      }
-                                      syncParticipants()
-                                  }
-                              }
-                          }
-                      }
-                  }
-
-                  fun updateMicState() {
-                      val shouldTransmit = isPttPressed || isOpenMicOn
+                  private fun startElectionLoop() {
                       scope.launch {
-                          runCatching {
-                              room?.localParticipant?.setMicrophoneEnabled(shouldTransmit)
+                          var stepDownSentMs = 0L
+                          while (isActive) {
+                              val now = System.currentTimeMillis()
+                              val isHost = election.currentHostId == selfId
+
+                              if (isHost && election.shouldStepDown(batteryPct, isCharging, thermalStatus, now)) {
+                                  if (stepDownSentMs == 0L) {
+                                      val reason = if (thermalStatus >= DeviceHealthMonitor.THERMAL_SEVERE) "THERMAL" else "BATTERY_LOW"
+                                      val sd = JSONObject().apply {
+                                          put("t", "STEP_DOWN")
+                                          put("id", selfId)
+                                          put("epoch", election.currentEpoch)
+                                          put("reason", reason)
+                                      }
+                                      broadcastJson(sd)
+                                      stepDownSentMs = now
+                                      statusText.value = "تنازلت عن القيادة ($reason). بانتظار قائد جديد..."
+                                  }
+                              }
+
+                              // After step-down, if no new host announced in 3s, force re-election
+                              if (stepDownSentMs > 0 && now - stepDownSentMs > 3000) {
+                                  val candidate = election.selectNewHost(peersMap.values)
+                                  if (candidate != null && candidate.nodeId == selfId) {
+                                      // We're the best candidate
+                                      val (newHost, newEpoch) = election.declareSelfAsHost()
+                                      currentHostIdState.longValue = newHost
+                                      currentEpochState.longValue = newEpoch
+                                      val announce = JSONObject().apply {
+                                          put("t", "I_AM_HOST")
+                                          put("id", newHost)
+                                          put("epoch", newEpoch)
+                                          put("bat", batteryPct)
+                                          put("chg", isCharging)
+                                          put("thm", thermalStatus)
+                                      }
+                                      broadcastJson(announce)
+                                      stepDownSentMs = 0L
+                                  }
+                              }
+
+                              // If I'm not the host but I'm the best candidate, announce
+                              if (!isHost && stepDownSentMs == 0L) {
+                                  val candidate = election.selectNewHost(peersMap.values)
+                                  if (candidate != null && candidate.nodeId == selfId &&
+                                      election.currentEpoch < candidate.epoch + 1) {
+                                      // Only announce if we're clearly the best
+                                      // (Don't spam; only if we haven't recently)
+                                  }
+                              }
+
+                              delay(1000)
                           }
                       }
                   }
 
-                  fun updateIdentityMetadata(newName: String, newRank: Int) {
-                      userName = newName
-                      chainRank = newRank
-                      scope.launch(Dispatchers.IO) {
-                          runCatching {
-                              val meta = JSONObject().apply {
-                                  put("rank", newRank)
-                                  put("name", newName)
-                              }.toString()
-                              room?.localParticipant?.updateName(newName)
-                              room?.localParticipant?.updateMetadata(meta)
+                  private fun startAudioTransmitter() {
+                      scope.launch {
+                          val minBuf = AudioRecord.getMinBufferSize(
+                              SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+                          ).coerceAtLeast(1280)
+                          var recorder: AudioRecord? = null
+                          val sendSock = DatagramSocket().apply { broadcast = true }
+
+                          while (isActive) {
+                              val active = isPttPressed || isOpenMicOn
+                              if (!active) {
+                                  if (recorder != null) {
+                                      runCatching { recorder?.stop(); recorder?.release() }
+                                      recorder = null
+                                  }
+                                  delay(25)
+                                  continue
+                              }
+                              if (recorder == null) {
+                                  runCatching {
+                                      recorder = AudioRecord(
+                                          MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                                          SAMPLE_RATE,
+                                          AudioFormat.CHANNEL_IN_MONO,
+                                          AudioFormat.ENCODING_PCM_16BIT,
+                                          minBuf * 2
+                                      ).also { rec ->
+                                          if (NoiseSuppressor.isAvailable()) {
+                                              runCatching { NoiseSuppressor.create(rec.audioSessionId)?.enabled = true }
+                                          }
+                                          if (AcousticEchoCanceler.isAvailable()) {
+                                              runCatching { AcousticEchoCanceler.create(rec.audioSessionId)?.enabled = true }
+                                          }
+                                          rec.startRecording()
+                                      }
+                                  }
+                              }
+                              val pcm = ByteArray(FRAME_BYTES)
+                              val read = recorder?.read(pcm, 0, FRAME_BYTES) ?: -1
+                              if (read > 0) {
+                                  val seq = seqCounter.getAndIncrement()
+                                  val pktBytes = ByteArray(14 + read)
+                                  val bb = ByteBuffer.wrap(pktBytes)
+                                  bb.put(MAGIC_AUDIO)
+                                  bb.putLong(selfId)
+                                  bb.putInt(seq)
+                                  bb.put(chainRank.toByte())
+                                  bb.put(pcm, 0, read)
+
+                                  for (b in getBroadcastAddresses()) {
+                                      runCatching {
+                                          sendSock.send(DatagramPacket(pktBytes, pktBytes.size, b, AUDIO_PORT))
+                                      }
+                                  }
+                              }
                           }
+                          runCatching { recorder?.stop(); recorder?.release(); sendSock.close() }
                       }
                   }
 
-                  // تصفية من يُسمع في المجموعة (مع إعطاء قائد السلسلة رقم 1 أولوية دائمة)
-                  fun applySelectiveAudioRouting() {
-                      val currentRoom = room ?: return
-                      for ((_, remote) in currentRoom.remoteParticipants) {
-                          val id = remote.identity?.value ?: continue
-                          val rank = parseRank(remote.metadata)
-                          val shouldHear = selectAllPeers || allowedPeerIds.contains(id) || rank == 1
-                          val vol = if (shouldHear) 1.0 else 0.0
-                          for ((_, pub) in remote.audioTrackPublications) {
-                              (pub.track as? RemoteAudioTrack)?.setVolume(vol)
+                  private fun startAudioReceiver() {
+                      scope.launch {
+                          val minOut = AudioTrack.getMinBufferSize(
+                              SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
+                          ).coerceAtLeast(1280)
+                          val track = AudioTrack.Builder()
+                              .setAudioAttributes(
+                                  AudioAttributes.Builder()
+                                      .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                                      .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                      .build()
+                              )
+                              .setAudioFormat(
+                                  AudioFormat.Builder()
+                                      .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                      .setSampleRate(SAMPLE_RATE)
+                                      .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                      .build()
+                              )
+                              .setBufferSizeInBytes(minOut * 2)
+                              .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                              .setTransferMode(AudioTrack.MODE_STREAM)
+                              .build()
+                          track.play()
+
+                          audioSocket = DatagramSocket(null).apply {
+                              reuseAddress = true
+                              broadcast = true
+                              bind(InetSocketAddress(AUDIO_PORT))
                           }
-                      }
-                  }
+                          val buf = ByteArray(2048)
+                          var lastClearJob: Job? = null
 
-                  private fun updateActiveSpeaker(speakers: List<Participant>) {
-                      val remoteSpeaker = speakers.firstOrNull { it.identity?.value != localIdentity }
-                      if (remoteSpeaker == null) {
-                          activeSpeakerName.value = null
-                          return
-                      }
-                      val rank = parseRank(remoteSpeaker.metadata)
-                      val pName = parseName(remoteSpeaker.metadata, remoteSpeaker.name)
-                      activeSpeakerName.value = if (rank == 1) "القائد ($pName)" else "$pName (راكب $rank)"
-                  }
+                          while (isActive) {
+                              runCatching {
+                                  val pkt = DatagramPacket(buf, buf.size)
+                                  audioSocket?.receive(pkt) ?: return@launch
+                                  if (pkt.length <= 14 || pkt.data[0] != MAGIC_AUDIO) return@runCatching
+                                  val bb = ByteBuffer.wrap(pkt.data, 0, pkt.length)
+                                  bb.get()
+                                  val senderId = bb.long
+                                  if (senderId == selfId) return@runCatching
+                                  val seq = bb.int
+                                  val rank = bb.get().toInt()
 
-                  private fun syncParticipants() {
-                      val currentRoom = room ?: return
-                      val activeIds = mutableSetOf<String>()
+                                  val key = (senderId * 31L) xor seq.toLong()
+                                  if (seenAudio.containsKey(key)) return@runCatching
+                                  seenAudio[key] = true
 
-                      for ((_, remote) in currentRoom.remoteParticipants) {
-                          val id = remote.identity?.value ?: continue
-                          activeIds.add(id)
-                          val rank = parseRank(remote.metadata)
-                          val pName = parseName(remote.metadata, remote.name)
-                          val rtt = peerRttMap[id] ?: measuredRttMs.longValue
-                          val pongAt = peerPongMap[id] ?: System.currentTimeMillis()
-
-                          peersMap[id] = RiderPeer(
-                              identity = id,
-                              name = pName,
-                              chainRank = rank,
-                              rttMs = rtt,
-                              isSpeaking = remote.isSpeaking,
-                              lastPongAt = pongAt
-                          )
-                          if (selectAllPeers) {
-                              allowedPeerIds.add(id)
+                                  val allowed = selectAllPeers || allowedPeerIds.contains(senderId) || rank == 1
+                                  if (allowed) {
+                                      val len = pkt.length - 14
+                                      track.write(pkt.data, 14, len)
+                                      val name = peersMap[senderId]?.name ?: "راكب #$rank"
+                                      activeSpeakerName.value = if (rank == 1) "القائد ($name)" else "$name (راكب $rank)"
+                                      lastClearJob?.cancel()
+                                      lastClearJob = scope.launch {
+                                          delay(600)
+                                          activeSpeakerName.value = null
+                                      }
+                                  }
+                              }
                           }
+                          runCatching { track.stop(); track.release() }
                       }
-                      peersMap.keys.retainAll(activeIds)
-                  }
-
-                  private fun parseRank(metadata: String?): Int {
-                      if (metadata.isNullOrBlank()) return 2
-                      return runCatching { JSONObject(metadata).optInt("rank", 2) }.getOrDefault(2)
-                  }
-
-                  private fun parseName(metadata: String?, fallback: String?): String {
-                      if (!metadata.isNullOrBlank()) {
-                          val n = runCatching { JSONObject(metadata).optString("name", "") }.getOrDefault("")
-                          if (n.isNotBlank()) return n
-                      }
-                      return if (!fallback.isNullOrBlank()) fallback else "راكب"
-                  }
-
-                  private fun disconnectCurrentRoom() {
-                      pingPongJob?.cancel()
-                      runCatching { room?.disconnect() }
-                      runCatching { room?.release() }
-                      room = null
-                      peersMap.clear()
-                      isConnected.value = false
-                  }
-
-                  fun stop() {
-                      disconnectCurrentRoom()
-                      scope.cancel()
                   }
               }
           """)
 
-          # =========================================================================
-          # الملف الثالث (3/3): MainActivity.kt - نفس الواجهة السوداء الممتازة مربوطة بـ LiveKit
-          # =========================================================================
-          write_clean("app/src/main/java/com/bikemic/app/MainActivity.kt", """
+          # =========================================================
+          # 8. MainActivity.kt (UI)
+          # =========================================================
+          write("app/src/main/java/com/bikemic/app/MainActivity.kt", """
               package com.bikemic.app
 
               import android.Manifest
@@ -863,6 +963,7 @@ jobs:
               import androidx.compose.ui.draw.clip
               import androidx.compose.ui.graphics.Color
               import androidx.compose.ui.input.pointer.pointerInput
+              import androidx.compose.ui.platform.LocalContext
               import androidx.compose.ui.platform.LocalLayoutDirection
               import androidx.compose.ui.text.TextStyle
               import androidx.compose.ui.text.font.FontWeight
@@ -874,45 +975,44 @@ jobs:
               import kotlinx.coroutines.delay
 
               class MainActivity : ComponentActivity() {
-
-                  private var engine: LiveKitVoiceEngine? = null
+                  private var engine: MeshVoiceEngine? = null
+                  private var health: DeviceHealthMonitor? = null
                   private val permissionsGranted = mutableStateOf(false)
 
-                  private fun getRequiredPermissions(): Array<String> {
-                      val perms = mutableListOf(Manifest.permission.RECORD_AUDIO)
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                          perms.add(Manifest.permission.BLUETOOTH_CONNECT)
-                      }
-                      return perms.toTypedArray()
+                  private fun requiredPermissions(): Array<String> {
+                      val p = mutableListOf(
+                          Manifest.permission.RECORD_AUDIO,
+                          Manifest.permission.ACCESS_WIFI_STATE,
+                          Manifest.permission.CHANGE_WIFI_STATE,
+                          Manifest.permission.CHANGE_WIFI_MULTICAST_STATE,
+                          Manifest.permission.ACCESS_FINE_LOCATION
+                      )
+                      if (Build.VERSION.SDK_INT >= 33) p.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+                      return p.toTypedArray()
                   }
 
-                  private val permissionLauncher = registerForActivityResult(
+                  private val permLauncher = registerForActivityResult(
                       ActivityResultContracts.RequestMultiplePermissions()
                   ) { result ->
-                      val audioGranted = result[Manifest.permission.RECORD_AUDIO] == true
-                      if (!audioGranted) {
-                          Toast.makeText(
-                              this,
-                              "يجب منح صلاحية المايكروفون ليعمل BikeMic. سيتم إغلاق البرنامج.",
-                              Toast.LENGTH_LONG
-                          ).show()
+                      val audio = result[Manifest.permission.RECORD_AUDIO] == true
+                      if (!audio) {
+                          Toast.makeText(this, "صلاحية المايك إلزامية. سيتم الإغلاق.", Toast.LENGTH_LONG).show()
                           finishAffinity()
                       } else {
                           permissionsGranted.value = true
-                          initAndConnectEngine()
+                          startAll()
                       }
                   }
 
                   override fun onCreate(savedInstanceState: Bundle?) {
                       super.onCreate(savedInstanceState)
-
-                      val prefs = getSharedPreferences("bikemic_livekit_prefs", Context.MODE_PRIVATE)
+                      val prefs = getSharedPreferences("bikemic_p2p", Context.MODE_PRIVATE)
 
                       if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                           permissionsGranted.value = true
-                          initAndConnectEngine()
+                          startAll()
                       } else {
-                          permissionLauncher.launch(getRequiredPermissions())
+                          permLauncher.launch(requiredPermissions())
                       }
 
                       setContent {
@@ -920,40 +1020,30 @@ jobs:
                               MaterialTheme(colorScheme = darkColorScheme(background = Color.Black, surface = Color(0xFF121212))) {
                                   Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
                                       if (permissionsGranted.value && engine != null) {
+                                          val ctx = LocalContext.current
+                                          LaunchedEffect(Unit) {
+                                              while (true) {
+                                                  engine?.leaderChangeEvent?.value?.let { msg ->
+                                                      Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+                                                      engine?.leaderChangeEvent?.value = null
+                                                  }
+                                                  delay(500)
+                                              }
+                                          }
                                           BikeMicScreen(
                                               engine = engine!!,
-                                              initialName = prefs.getString("rider_name", "أبو ناصر") ?: "أبو ناصر",
-                                              initialRank = prefs.getInt("rider_rank", 1),
-                                              initialUrl = prefs.getString("lk_url", BuildConfig.DEFAULT_LK_URL) ?: BuildConfig.DEFAULT_LK_URL,
-                                              initialKey = prefs.getString("lk_key", BuildConfig.DEFAULT_LK_KEY) ?: BuildConfig.DEFAULT_LK_KEY,
-                                              initialSecret = prefs.getString("lk_secret", BuildConfig.DEFAULT_LK_SECRET) ?: BuildConfig.DEFAULT_LK_SECRET,
-                                              initialRoom = prefs.getString("lk_room", "bikemic-oman") ?: "bikemic-oman",
-                                              onSaveRider = { newName, newRank ->
-                                                  prefs.edit()
-                                                      .putString("rider_name", newName)
-                                                      .putInt("rider_rank", newRank)
-                                                      .apply()
-                                              },
-                                              onSaveServerAndReconnect = { url, key, secret, room ->
-                                                  prefs.edit()
-                                                      .putString("lk_url", url.trim())
-                                                      .putString("lk_key", key.trim())
-                                                      .putString("lk_secret", secret.trim())
-                                                      .putString("lk_room", room.trim().ifBlank { "bikemic-oman" })
-                                                      .apply()
-                                                  engine?.connectToLiveKit(url.trim(), key.trim(), secret.trim(), room.trim().ifBlank { "bikemic-oman" })
+                                              initialName = prefs.getString("name", "أبو ناصر") ?: "أبو ناصر",
+                                              initialRank = prefs.getInt("rank", 1),
+                                              onSave = { n, r ->
+                                                  prefs.edit().putString("name", n).putInt("rank", r).apply()
                                               }
                                           )
                                       } else {
-                                          Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                          Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                               Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                                   CircularProgressIndicator(color = Color.Red)
-                                                  Spacer(modifier = Modifier.height(16.dp))
-                                                  Text(
-                                                      text = "الرجاء منح صلاحية الصوت لبدء الاستخدام...",
-                                                      color = Color.White,
-                                                      fontSize = 15.sp
-                                                  )
+                                                  Spacer(Modifier.height(16.dp))
+                                                  Text("الرجاء منح الصلاحيات للبدء...", color = Color.White)
                                               }
                                           }
                                       }
@@ -963,267 +1053,182 @@ jobs:
                       }
                   }
 
-                  private fun initAndConnectEngine() {
+                  private fun startAll() {
                       if (engine == null) {
-                          val prefs = getSharedPreferences("bikemic_livekit_prefs", Context.MODE_PRIVATE)
-                          val url = prefs.getString("lk_url", BuildConfig.DEFAULT_LK_URL) ?: BuildConfig.DEFAULT_LK_URL
-                          val key = prefs.getString("lk_key", BuildConfig.DEFAULT_LK_KEY) ?: BuildConfig.DEFAULT_LK_KEY
-                          val secret = prefs.getString("lk_secret", BuildConfig.DEFAULT_LK_SECRET) ?: BuildConfig.DEFAULT_LK_SECRET
-                          val room = prefs.getString("lk_room", "bikemic-oman") ?: "bikemic-oman"
-
-                          engine = LiveKitVoiceEngine(this).apply {
-                              userName = prefs.getString("rider_name", "أبو ناصر") ?: "أبو ناصر"
-                              chainRank = prefs.getInt("rider_rank", 1)
-                              connectToLiveKit(url, key, secret, room)
+                          val prefs = getSharedPreferences("bikemic_p2p", Context.MODE_PRIVATE)
+                          val e = MeshVoiceEngine(this).apply {
+                              userName = prefs.getString("name", "أبو ناصر") ?: "أبو ناصر"
+                              chainRank = prefs.getInt("rank", 1)
                           }
+                          engine = e
+                          health = DeviceHealthMonitor(this) { bat, chg, thm ->
+                              e.updateHealth(bat, chg, thm)
+                          }.also { it.start() }
+                          e.start()
                       }
                   }
 
                   override fun onDestroy() {
                       super.onDestroy()
                       engine?.stop()
+                      health?.stop()
                   }
               }
 
               @Composable
               fun BikeMicScreen(
-                  engine: LiveKitVoiceEngine,
+                  engine: MeshVoiceEngine,
                   initialName: String,
                   initialRank: Int,
-                  initialUrl: String,
-                  initialKey: String,
-                  initialSecret: String,
-                  initialRoom: String,
-                  onSaveRider: (String, Int) -> Unit,
-                  onSaveServerAndReconnect: (String, String, String, String) -> Unit
+                  onSave: (String, Int) -> Unit
               ) {
-                  var userName by remember { mutableStateOf(initialName) }
-                  var chainRank by remember { mutableIntStateOf(initialRank) }
-                  var isEditingName by remember { mutableStateOf(false) }
-                  var isPttPressed by remember { mutableStateOf(false) }
-                  var isOpenMicOn by remember { mutableStateOf(false) }
-                  var showUsersDialog by remember { mutableStateOf(false) }
-                  var showRankDialog by remember { mutableStateOf(false) }
-                  var showServerDialog by remember { mutableStateOf(initialUrl.isBlank()) }
+                  var name by remember { mutableStateOf(initialName) }
+                  var rank by remember { mutableIntStateOf(initialRank) }
+                  var editing by remember { mutableStateOf(false) }
+                  var ptt by remember { mutableStateOf(false) }
+                  var micOn by remember { mutableStateOf(false) }
+                  var showUsers by remember { mutableStateOf(false) }
+                  var showRankDlg by remember { mutableStateOf(false) }
+                  var showInfo by remember { mutableStateOf(false) }
                   var selectAll by remember { mutableStateOf(true) }
+                  val selected = remember { mutableStateListOf<Long>() }
 
-                  var lkUrl by remember { mutableStateOf(initialUrl) }
-                  var lkKey by remember { mutableStateOf(initialKey) }
-                  var lkSecret by remember { mutableStateOf(initialSecret) }
-                  var lkRoom by remember { mutableStateOf(initialRoom) }
-
-                  val peersList = remember { mutableStateListOf<RiderPeer>() }
-                  val selectedIds = remember { mutableStateListOf<String>() }
-
-                  LaunchedEffect(Unit) {
-                      while (true) {
-                          val sorted = engine.peersMap.values.sortedBy { it.chainRank }
-                          peersList.clear()
-                          peersList.addAll(sorted)
-                          if (selectAll) {
-                              sorted.forEach {
-                                  if (!selectedIds.contains(it.identity)) selectedIds.add(it.identity)
-                              }
-                          }
-                          delay(800)
-                      }
-                  }
-
-                  val chainPositionText = remember(chainRank, peersList.size) {
-                      val maxRank = maxOf(chainRank, peersList.maxOfOrNull { it.chainRank } ?: chainRank)
-                      when {
-                          chainRank == 1 -> "الراكب 1: قائد السلسلة (أعلى أولوية) • خلفي رقم 2"
-                          chainRank >= maxRank && chainRank > 1 -> "الراكب $chainRank: مؤخرة السلسلة • أمامي رقم ${chainRank - 1}"
-                          else -> "الراكب $chainRank في السلسلة • أمامي ${chainRank - 1} وخلفي ${chainRank + 1}"
-                      }
-                  }
-
-                  val pttCircleColor by animateColorAsState(
-                      targetValue = if (isPttPressed) Color(0xFFBDBDBD) else Color(0xFF222222),
-                      label = "pttColor"
-                  )
-
-                  val micButtonColor by animateColorAsState(
-                      targetValue = if (isOpenMicOn) Color(0xFFFF3B30) else Color(0xFF5C0A0A),
-                      label = "micColor"
-                  )
-
+                  val peers = remember { mutableStateListOf<PeerInfo>() }
+                  val ver by engine.peersVersion
+                  val connected by engine.connectedCount
+                  val status by engine.statusText
                   val speaker by engine.activeSpeakerName
-                  val connStatus by engine.connectionStateText
-                  val connected by engine.isConnected
-                  val rtt by engine.measuredRttMs
-                  val jitter by engine.measuredJitterMs
-                  val pongs by engine.pongCounter
+                  val hostId by engine.currentHostIdState
+                  val epoch by engine.currentEpochState
+
+                  LaunchedEffect(ver) {
+                      val list = engine.peersMap.values.sortedBy { it.chainRank }
+                      peers.clear(); peers.addAll(list)
+                  }
+
+                  val isHost = hostId == engine.selfId
+                  val pttColor by animateColorAsState(
+                      if (ptt) Color(0xFFBDBDBD) else Color(0xFF222222), label = "p"
+                  )
+                  val micColor by animateColorAsState(
+                      if (micOn) Color(0xFFFF3B30) else Color(0xFF5C0A0A), label = "m"
+                  )
 
                   Box(
-                      modifier = Modifier
-                          .fillMaxSize()
-                          .background(Color.Black)
+                      Modifier.fillMaxSize().background(Color.Black)
                           .padding(horizontal = 16.dp, vertical = 14.dp)
                   ) {
-                      // الشريط العلوي (كما هو: يسار الشاشة خانة المستخدمين، ويمين الشاشة ترتيب السلسلة + زر إعداد LiveKit)
+                      // Top bar
                       Row(
-                          modifier = Modifier
-                              .fillMaxWidth()
-                              .align(Alignment.TopCenter),
+                          Modifier.fillMaxWidth().align(Alignment.TopCenter),
                           horizontalArrangement = Arrangement.SpaceBetween,
                           verticalAlignment = Alignment.CenterVertically
                       ) {
                           Button(
-                              onClick = { showUsersDialog = true },
+                              onClick = { showUsers = true },
                               colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1C1C1E)),
                               shape = RoundedCornerShape(12.dp),
                               contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                           ) {
                               Icon(
-                                  Icons.Default.Groups,
-                                  contentDescription = "المستخدمين",
-                                  tint = if (connected) Color(0xFF32D74B) else Color(0xFFFF453A)
+                                  Icons.Default.Groups, null,
+                                  tint = if (connected > 0) Color(0xFF32D74B) else Color(0xFFFF453A)
                               )
-                              Spacer(modifier = Modifier.width(6.dp))
-                              Text(
-                                  text = "المستخدمين (${peersList.size})",
-                                  color = Color.White,
-                                  fontSize = 13.sp,
-                                  fontWeight = FontWeight.Bold
-                              )
+                              Spacer(Modifier.width(6.dp))
+                              Text("متصلون ($connected)", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                           }
 
                           Row(verticalAlignment = Alignment.CenterVertically) {
-                              IconButton(onClick = { showServerDialog = true }) {
+                              IconButton(onClick = { showInfo = true }) {
                                   Icon(
-                                      imageVector = Icons.Default.CloudDone,
-                                      contentDescription = "إعدادات LiveKit",
-                                      tint = if (connected) Color(0xFF32D74B) else Color(0xFFFF9F0A)
+                                      Icons.Default.Info,
+                                      contentDescription = "معلومات",
+                                      tint = if (isHost) Color(0xFFFFD60A) else Color(0xFF8E8E93)
                                   )
                               }
-
                               OutlinedButton(
-                                  onClick = { showRankDialog = true },
+                                  onClick = { showRankDlg = true },
                                   shape = RoundedCornerShape(12.dp),
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
                               ) {
                                   Text(
-                                      text = "راكب #$chainRank",
-                                      color = if (chainRank == 1) Color(0xFFFFD60A) else Color.LightGray,
-                                      fontWeight = FontWeight.Bold,
-                                      fontSize = 13.sp
+                                      "راكب #$rank",
+                                      color = if (rank == 1) Color(0xFFFFD60A) else Color.LightGray,
+                                      fontWeight = FontWeight.Bold, fontSize = 13.sp
                                   )
                               }
                           }
                       }
 
-                      // أعلى الشاشة في المنتصف: اسم المستخدم + موقعه في السلسلة + مؤشر PING/PONG & Jitter Buffer
+                      // Center top: name + rank + leader info + status
                       Column(
-                          modifier = Modifier
-                              .fillMaxWidth()
-                              .align(Alignment.TopCenter)
-                              .padding(top = 56.dp),
+                          Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(top = 56.dp),
                           horizontalAlignment = Alignment.CenterHorizontally
                       ) {
-                          if (isEditingName) {
-                              Row(
-                                  verticalAlignment = Alignment.CenterVertically,
-                                  horizontalArrangement = Arrangement.Center
-                              ) {
+                          if (editing) {
+                              Row(verticalAlignment = Alignment.CenterVertically) {
                                   OutlinedTextField(
-                                      value = userName,
-                                      onValueChange = { userName = it },
+                                      value = name, onValueChange = { name = it },
                                       singleLine = true,
                                       textStyle = TextStyle(color = Color.White, fontSize = 16.sp, textAlign = TextAlign.Center),
-                                      modifier = Modifier.width(210.dp)
+                                      modifier = Modifier.width(220.dp)
                                   )
                                   IconButton(onClick = {
-                                      isEditingName = false
-                                      engine.updateIdentityMetadata(userName, chainRank)
-                                      onSaveRider(userName, chainRank)
+                                      editing = false
+                                      engine.updateUser(name, rank)
+                                      onSave(name, rank)
                                   }) {
-                                      Icon(Icons.Default.Check, contentDescription = "حفظ", tint = Color(0xFF32D74B))
+                                      Icon(Icons.Default.Check, null, tint = Color(0xFF32D74B))
                                   }
                               }
                           } else {
                               Row(
-                                  modifier = Modifier
-                                      .clip(RoundedCornerShape(8.dp))
-                                      .clickable { isEditingName = true }
+                                  Modifier.clip(RoundedCornerShape(8.dp))
+                                      .clickable { editing = true }
                                       .padding(horizontal = 12.dp, vertical = 4.dp),
                                   verticalAlignment = Alignment.CenterVertically
                               ) {
-                                  Text(
-                                      text = userName,
-                                      color = Color.White,
-                                      fontSize = 18.sp,
-                                      fontWeight = FontWeight.Bold
-                                  )
-                                  Spacer(modifier = Modifier.width(6.dp))
-                                  Icon(
-                                      imageVector = Icons.Default.Edit,
-                                      contentDescription = "تعديل الاسم",
-                                      tint = Color.Gray,
-                                      modifier = Modifier.size(16.dp)
-                                  )
+                                  Text(name, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                                  Spacer(Modifier.width(6.dp))
+                                  Icon(Icons.Default.Edit, null, tint = Color.Gray, modifier = Modifier.size(16.dp))
                               }
                           }
 
                           Text(
-                              text = chainPositionText,
-                              color = Color(0xFF8E8E93),
-                              fontSize = 12.sp,
-                              textAlign = TextAlign.Center
+                              if (isHost) "أنت القائد • Epoch $epoch" else "خلف القائد (Epoch $epoch)",
+                              color = if (isHost) Color(0xFFFFD60A) else Color(0xFF8E8E93),
+                              fontSize = 12.sp
+                          )
+                          Text(
+                              "بطارية: ${engine.batteryPct}%${if (engine.isCharging) " ⚡" else ""} • حرارة: ${thermalLabel(engine.thermalStatus)}",
+                              color = Color(0xFF636366), fontSize = 11.sp
                           )
 
-                          Spacer(modifier = Modifier.height(6.dp))
+                          Spacer(Modifier.height(6.dp))
                           if (speaker != null) {
-                              Text(
-                                  text = "يتحدث الآن: $speaker",
-                                  color = Color(0xFF32D74B),
-                                  fontSize = 14.sp,
-                                  fontWeight = FontWeight.Bold
-                              )
+                              Text("يتحدث: $speaker", color = Color(0xFF32D74B), fontSize = 14.sp, fontWeight = FontWeight.Bold)
                           } else {
-                              Text(
-                                  text = connStatus,
-                                  color = if (connected) Color(0xFF32D74B) else Color(0xFFFF9F0A),
-                                  fontSize = 12.sp
-                              )
-                          }
-
-                          if (connected) {
-                              Text(
-                                  text = "PING/PONG: ${rtt}ms • Jitter: ${jitter}ms (Buffer: ${engine.targetJitterMs}ms) • #${pongs}",
-                                  color = Color(0xFF636366),
-                                  fontSize = 11.sp
-                              )
+                              Text(status, color = if (connected > 0) Color(0xFF32D74B) else Color(0xFFFF9F0A), fontSize = 12.sp)
                           }
                       }
 
-                      // وسط الشاشة أو أقل قليلاً: دائرة البرقية الكبيرة + تحتها دائرة المايك الحمراء (نفس الواجهة تماماً)
+                      // Center: PTT + Mic
                       Column(
-                          modifier = Modifier
-                              .align(Alignment.Center)
-                              .padding(top = 60.dp),
+                          Modifier.align(Alignment.Center).padding(top = 60.dp),
                           horizontalAlignment = Alignment.CenterHorizontally
                       ) {
                           Box(
-                              modifier = Modifier
-                                  .size(230.dp)
-                                  .clip(CircleShape)
-                                  .background(pttCircleColor)
-                                  .border(
-                                      width = 3.dp,
-                                      color = if (isPttPressed) Color.White else Color(0xFF3A3A3C),
-                                      shape = CircleShape
-                                  )
+                              Modifier.size(230.dp).clip(CircleShape)
+                                  .background(pttColor)
+                                  .border(3.dp, if (ptt) Color.White else Color(0xFF3A3A3C), CircleShape)
                                   .pointerInput(Unit) {
                                       detectTapGestures(
                                           onPress = {
-                                              isPttPressed = true
+                                              ptt = true
                                               engine.isPttPressed = true
-                                              engine.updateMicState()
                                               tryAwaitRelease()
-                                              isPttPressed = false
+                                              ptt = false
                                               engine.isPttPressed = false
-                                              engine.updateMicState()
                                           }
                                       )
                                   },
@@ -1231,150 +1236,87 @@ jobs:
                           ) {
                               Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                   Icon(
-                                      imageVector = Icons.Default.Bolt,
-                                      contentDescription = "برقية",
-                                      tint = if (isPttPressed) Color.Black else Color(0xFF9E9E9E),
+                                      Icons.Default.Bolt, null,
+                                      tint = if (ptt) Color.Black else Color(0xFF9E9E9E),
                                       modifier = Modifier.size(64.dp)
                                   )
-                                  Spacer(modifier = Modifier.height(6.dp))
                                   Text(
-                                      text = if (isPttPressed) "جاري إرسال البرقية..." else "اضغط مطولاً للبرقية",
-                                      color = if (isPttPressed) Color.Black else Color(0xFFB0B0B0),
-                                      fontSize = 15.sp,
-                                      fontWeight = FontWeight.Bold
+                                      if (ptt) "جاري إرسال البرقية..." else "اضغط مطولاً للبرقية",
+                                      color = if (ptt) Color.Black else Color(0xFFB0B0B0),
+                                      fontSize = 15.sp, fontWeight = FontWeight.Bold
                                   )
                               }
                           }
-
-                          Spacer(modifier = Modifier.height(34.dp))
-
+                          Spacer(Modifier.height(34.dp))
                           Box(
-                              modifier = Modifier
-                                  .size(92.dp)
-                                  .clip(CircleShape)
-                                  .background(micButtonColor)
-                                  .border(
-                                      width = 2.dp,
-                                      color = if (isOpenMicOn) Color(0xFFFF8A80) else Color(0xFF8B0000),
-                                      shape = CircleShape
-                                  )
-                                  .clickable {
-                                      isOpenMicOn = !isOpenMicOn
-                                      engine.isOpenMicOn = isOpenMicOn
-                                      engine.updateMicState()
-                                  },
+                              Modifier.size(92.dp).clip(CircleShape)
+                                  .background(micColor)
+                                  .border(2.dp, if (micOn) Color(0xFFFF8A80) else Color(0xFF8B0000), CircleShape)
+                                  .clickable { micOn = !micOn; engine.isOpenMicOn = micOn },
                               contentAlignment = Alignment.Center
                           ) {
                               Icon(
-                                  imageVector = if (isOpenMicOn) Icons.Default.Mic else Icons.Default.MicOff,
-                                  contentDescription = "مايكروفون الاتصال المباشر",
-                                  tint = Color.White,
-                                  modifier = Modifier.size(42.dp)
+                                  if (micOn) Icons.Default.Mic else Icons.Default.MicOff,
+                                  null, tint = Color.White, modifier = Modifier.size(42.dp)
                               )
                           }
-
-                          Spacer(modifier = Modifier.height(10.dp))
+                          Spacer(Modifier.height(10.dp))
                           Text(
-                              text = if (isOpenMicOn) "اتصال صوتي مباشر مفتوح للمجموعة" else "المايك مطفأ (اضغط للتشغيل المباشر)",
-                              color = if (isOpenMicOn) Color(0xFFFF453A) else Color(0xFF636366),
-                              fontSize = 13.sp,
-                              fontWeight = FontWeight.SemiBold
+                              if (micOn) "اتصال صوتي مباشر مفتوح" else "المايك مطفأ",
+                              color = if (micOn) Color(0xFFFF453A) else Color(0xFF636366),
+                              fontSize = 13.sp, fontWeight = FontWeight.SemiBold
                           )
                       }
 
-                      // نافذة المستخدمين على LiveKit من أي مكان في العالم
-                      if (showUsersDialog) {
+                      // Users Dialog
+                      if (showUsers) {
                           AlertDialog(
-                              onDismissRequest = { showUsersDialog = false },
+                              onDismissRequest = { showUsers = false },
                               containerColor = Color(0xFF1C1C1E),
-                              title = {
-                                  Text("دراجو الغرفة المتصلون (${peersList.size})", color = Color.White, fontWeight = FontWeight.Bold)
-                              },
+                              title = { Text("الدراجون المتصلون (${peers.count { it.handshakeOk }})", color = Color.White, fontWeight = FontWeight.Bold) },
                               text = {
                                   Column {
                                       Row(
-                                          verticalAlignment = Alignment.CenterVertically,
-                                          modifier = Modifier
-                                              .fillMaxWidth()
-                                              .clickable {
-                                                  selectAll = !selectAll
-                                                  engine.selectAllPeers = selectAll
-                                                  if (selectAll) {
-                                                      selectedIds.clear()
-                                                      peersList.forEach {
-                                                          selectedIds.add(it.identity)
-                                                          engine.allowedPeerIds.add(it.identity)
-                                                      }
-                                                  }
-                                                  engine.applySelectiveAudioRouting()
-                                              }
-                                              .padding(vertical = 6.dp)
+                                          Modifier.fillMaxWidth().clickable {
+                                              selectAll = !selectAll
+                                              engine.selectAllPeers = selectAll
+                                              if (selectAll) peers.forEach { selected.add(it.nodeId); engine.allowedPeerIds.add(it.nodeId) }
+                                          }.padding(vertical = 6.dp),
+                                          verticalAlignment = Alignment.CenterVertically
                                       ) {
-                                          Checkbox(
-                                              checked = selectAll,
-                                              onCheckedChange = { checked ->
-                                                  selectAll = checked
-                                                  engine.selectAllPeers = checked
-                                                  if (checked) {
-                                                      selectedIds.clear()
-                                                      peersList.forEach {
-                                                          selectedIds.add(it.identity)
-                                                          engine.allowedPeerIds.add(it.identity)
-                                                      }
-                                                  }
-                                                  engine.applySelectiveAudioRouting()
-                                              }
-                                          )
-                                          Text("تحديد الكل وضمهم في نطاق البرقيات والمكالمات", color = Color.White, fontSize = 13.sp)
+                                          Checkbox(checked = selectAll, onCheckedChange = { c ->
+                                              selectAll = c; engine.selectAllPeers = c
+                                              if (c) peers.forEach { selected.add(it.nodeId); engine.allowedPeerIds.add(it.nodeId) }
+                                          })
+                                          Text("ضم الكل في البرقيات والمكالمات", color = Color.White, fontSize = 13.sp)
                                       }
-
                                       HorizontalDivider(color = Color.DarkGray)
-                                      Spacer(modifier = Modifier.height(8.dp))
-
-                                      if (peersList.isEmpty()) {
+                                      Spacer(Modifier.height(8.dp))
+                                      if (peers.isEmpty()) {
                                           Text(
-                                              text = if (connected)
-                                                  "متصل بـ LiveKit بنجاح! بمجرد دخول أي دراج آخر بنفس اسم الغرفة ($lkRoom) سيظهر هنا فوراً من أي مكان."
-                                              else
-                                                  "غير متصل بالسيرفر بعد. اضغط على أيقونة السحابة لإدخال مفاتيح LiveKit.",
-                                              color = Color.Gray,
-                                              fontSize = 13.sp
+                                              "لا يوجد أحد بعد. تأكد من اتصال جميع الهواتف بنفس الواي فاي/الهوتسبوت.",
+                                              color = Color.Gray, fontSize = 13.sp
                                           )
                                       } else {
-                                          LazyColumn(modifier = Modifier.heightIn(max = 240.dp)) {
-                                              items(peersList) { peer ->
-                                                  val isChecked = selectAll || selectedIds.contains(peer.identity)
-                                                  Row(
-                                                      verticalAlignment = Alignment.CenterVertically,
-                                                      modifier = Modifier
-                                                          .fillMaxWidth()
-                                                          .padding(vertical = 4.dp)
-                                                  ) {
-                                                      Checkbox(
-                                                          checked = isChecked,
-                                                          onCheckedChange = { chk ->
-                                                              selectAll = false
-                                                              engine.selectAllPeers = false
-                                                              if (chk) {
-                                                                  selectedIds.add(peer.identity)
-                                                                  engine.allowedPeerIds.add(peer.identity)
-                                                              } else {
-                                                                  selectedIds.remove(peer.identity)
-                                                                  engine.allowedPeerIds.remove(peer.identity)
-                                                              }
-                                                              engine.applySelectiveAudioRouting()
-                                                          }
-                                                      )
-                                                      Column {
+                                          LazyColumn(Modifier.heightIn(max = 280.dp)) {
+                                              items(peers) { p ->
+                                                  val isHostP = p.nodeId == hostId
+                                                  val checked = selectAll || selected.contains(p.nodeId)
+                                                  Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                      Checkbox(checked = checked, onCheckedChange = { c ->
+                                                          selectAll = false; engine.selectAllPeers = false
+                                                          if (c) { selected.add(p.nodeId); engine.allowedPeerIds.add(p.nodeId) }
+                                                          else { selected.remove(p.nodeId); engine.allowedPeerIds.remove(p.nodeId) }
+                                                      })
+                                                      Column(Modifier.weight(1f)) {
                                                           Text(
-                                                              text = "راكب ${peer.chainRank}: ${peer.name}",
-                                                              color = if (peer.chainRank == 1) Color(0xFFFFD60A) else Color.White,
-                                                              fontWeight = FontWeight.Bold,
-                                                              fontSize = 14.sp
+                                                              "راكب ${p.chainRank}: ${p.name}" + if (isHostP) " ⭐" else "",
+                                                              color = if (isHostP) Color(0xFFFFD60A) else Color.White,
+                                                              fontWeight = FontWeight.Bold, fontSize = 14.sp
                                                           )
                                                           Text(
-                                                              text = "متصل عبر LiveKit • PING: ${peer.rttMs}ms",
-                                                              color = Color(0xFF32D74B),
+                                                              "${if (p.handshakeOk) "متصل فعلياً" else "بانتظار التأكيد"} • بطارية ${p.batteryPct}% • ${thermalLabel(p.thermalStatus)}",
+                                                              color = if (p.handshakeOk) Color(0xFF32D74B) else Color(0xFFFF9F0A),
                                                               fontSize = 11.sp
                                                           )
                                                       }
@@ -1386,129 +1328,110 @@ jobs:
                               },
                               confirmButton = {
                                   Button(
-                                      onClick = { showUsersDialog = false },
+                                      onClick = { showUsers = false },
                                       colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F))
-                                  ) {
-                                      Text("تم", color = Color.White)
-                                  }
+                                  ) { Text("تم", color = Color.White) }
                               }
                           )
                       }
 
-                      // نافذة اختيار رقم الراكب في السلسلة
-                      if (showRankDialog) {
+                      // Rank Dialog
+                      if (showRankDlg) {
                           AlertDialog(
-                              onDismissRequest = { showRankDialog = false },
+                              onDismissRequest = { showRankDlg = false },
                               containerColor = Color(0xFF1C1C1E),
                               title = { Text("ترتيبك في السلسلة", color = Color.White) },
                               text = {
-                                  LazyColumn(modifier = Modifier.height(260.dp)) {
+                                  LazyColumn(Modifier.height(280.dp)) {
                                       items((1..12).toList()) { num ->
-                                          val label = when (num) {
-                                              1 -> "الراكب 1 = قائد السلسلة (أعلى أولوية)"
-                                              else -> "الراكب $num (وراء ${num - 1}، وأمامي ${num + 1})"
-                                          }
+                                          val label = if (num == 1) "1 = قائد السلسلة" else "$num (خلف ${num - 1}، أمام ${num + 1})"
                                           TextButton(
                                               onClick = {
-                                                  chainRank = num
-                                                  engine.updateIdentityMetadata(userName, num)
-                                                  onSaveRider(userName, num)
-                                                  showRankDialog = false
+                                                  rank = num; engine.updateUser(name, num); onSave(name, num)
+                                                  showRankDlg = false
                                               },
                                               modifier = Modifier.fillMaxWidth()
                                           ) {
-                                              Text(
-                                                  text = label,
-                                                  color = if (chainRank == num) Color(0xFFFF453A) else Color.White,
-                                                  fontWeight = if (chainRank == num) FontWeight.Bold else FontWeight.Normal
-                                              )
+                                              Text(label, color = if (rank == num) Color(0xFFFF453A) else Color.White,
+                                                   fontWeight = if (rank == num) FontWeight.Bold else FontWeight.Normal)
                                           }
                                       }
                                   }
                               },
                               confirmButton = {
-                                  TextButton(onClick = { showRankDialog = false }) {
-                                      Text("إغلاق", color = Color.Gray)
-                                  }
+                                  TextButton(onClick = { showRankDlg = false }) { Text("إغلاق", color = Color.Gray) }
                               }
                           )
                       }
 
-                      // نافذة إعداد LiveKit السريعة (تُقرأ تلقائياً من Secrets إن وُجدت، أو تُحفظ محلياً لمرة واحدة)
-                      if (showServerDialog) {
+                      // Info Dialog
+                      if (showInfo) {
                           AlertDialog(
-                              onDismissRequest = { showServerDialog = false },
+                              onDismissRequest = { showInfo = false },
                               containerColor = Color(0xFF1C1C1E),
-                              title = { Text("إعداد اتصال LiveKit السحابي", color = Color.White, fontWeight = FontWeight.Bold) },
+                              title = { Text("معلومات الشبكة", color = Color.White, fontWeight = FontWeight.Bold) },
                               text = {
-                                  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                      OutlinedTextField(
-                                          value = lkUrl,
-                                          onValueChange = { lkUrl = it },
-                                          label = { Text("LiveKit WSS URL (wss://...)") },
-                                          singleLine = true,
-                                          textStyle = TextStyle(color = Color.White, fontSize = 13.sp)
+                                  Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                      Text("معرفك: ${engine.selfId}", color = Color.Gray, fontSize = 11.sp)
+                                      Text("القائد الحالي: ${if (isHost) "أنت" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")}", color = Color.White)
+                                      Text("Epoch: $epoch", color = Color.Gray, fontSize = 12.sp)
+                                      Text("الدراجون المتصلون فعلياً: ${peers.count { it.handshakeOk }}", color = Color.White)
+                                      HorizontalDivider(color = Color.DarkGray)
+                                      Text("حالتك:", color = Color.Gray, fontSize = 12.sp)
+                                      Text("• بطارية: ${engine.batteryPct}%${if (engine.isCharging) " (تشحن)" else ""}", color = Color.White, fontSize = 13.sp)
+                                      Text("• حرارة: ${thermalLabel(engine.thermalStatus)}", color = Color.White, fontSize = 13.sp)
+                                      Spacer(Modifier.height(6.dp))
+                                      Text(
+                                          "قواعد التنازل التلقائي: البطارية < 30% بدون شحن، أو الحرارة SEVERE/CRITICAL لمدة 30 ثانية متواصلة.",
+                                          color = Color(0xFFFF9F0A), fontSize = 11.sp
                                       )
-                                      OutlinedTextField(
-                                          value = lkKey,
-                                          onValueChange = { lkKey = it },
-                                          label = { Text("API Key") },
-                                          singleLine = true,
-                                          textStyle = TextStyle(color = Color.White, fontSize = 13.sp)
-                                      )
-                                      OutlinedTextField(
-                                          value = lkSecret,
-                                          onValueChange = { lkSecret = it },
-                                          label = { Text("API Secret") },
-                                          singleLine = true,
-                                          textStyle = TextStyle(color = Color.White, fontSize = 13.sp)
-                                      )
-                                      OutlinedTextField(
-                                          value = lkRoom,
-                                          onValueChange = { lkRoom = it },
-                                          label = { Text("اسم غرفة السلسلة (المشترك)") },
-                                          singleLine = true,
-                                          textStyle = TextStyle(color = Color.White, fontSize = 13.sp)
+                                      Spacer(Modifier.height(6.dp))
+                                      Text(
+                                          "ملاحظة: يجب أن تكون جميع الهواتف على نفس شبكة الواي فاي أو الهوتسبوت. لا حاجة لإنترنت أو راوتر.",
+                                          color = Color.Gray, fontSize = 11.sp
                                       )
                                   }
                               },
                               confirmButton = {
                                   Button(
-                                      onClick = {
-                                          showServerDialog = false
-                                          onSaveServerAndReconnect(lkUrl, lkKey, lkSecret, lkRoom)
-                                      },
+                                      onClick = { showInfo = false },
                                       colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF32D74B))
-                                  ) {
-                                      Text("حفظ واتصال فوري", color = Color.Black, fontWeight = FontWeight.Bold)
-                                  }
-                              },
-                              dismissButton = {
-                                  TextButton(onClick = { showServerDialog = false }) {
-                                      Text("إلغاء", color = Color.Gray)
-                                  }
+                                  ) { Text("فهمت", color = Color.Black) }
                               }
                           )
                       }
                   }
               }
+
+              fun thermalLabel(t: Int): String = when (t) {
+                  DeviceHealthMonitor.THERMAL_NONE -> "طبيعي"
+                  DeviceHealthMonitor.THERMAL_LIGHT -> "خفيف"
+                  DeviceHealthMonitor.THERMAL_MODERATE -> "متوسط"
+                  DeviceHealthMonitor.THERMAL_SEVERE -> "مرتفع ⚠️"
+                  else -> "حرج 🚨"
+              }
           """)
 
-          print("3-File LiveKit architecture generated cleanly!")
+          print("BikeMic P2P Mesh project generated successfully.")
           PYEOF
-          python3 /tmp/gen_bikemic_livekit.py
+          python3 /tmp/gen_bikemic_p2p.py
 
-      - name: Build Signed Release APK
+      - name: Build Release APK
+        env:
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          K_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          K_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle assembleRelease --no-daemon --stacktrace
 
-      - name: Verify Release APK Output
+      - name: Verify APK
         run: |
           ls -lh app/build/outputs/apk/release/
           test -f app/build/outputs/apk/release/app-release.apk
+          echo "APK size: $(du -h app/build/outputs/apk/release/app-release.apk | cut -f1)"
 
-      - name: Upload BikeMic Release APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BikeMic-LiveKit-Release-APK
+          name: BikeMic-P2P-Mesh-APK
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 30
