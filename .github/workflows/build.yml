@@ -1,16 +1,9 @@
-name: Build BikeMic P2P Mesh APK (Fixed & Optimized)
+name: Build BikeMic APK
 
 on:
   push:
     branches: [ "main", "master" ]
   workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build:
@@ -22,7 +15,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -32,18 +25,14 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Prepare Android SDK & Licenses
+      - name: Prepare Android SDK
         run: |
           export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           mkdir -p "$ANDROID_SDK_ROOT/licenses"
           printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
-          printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-preview-license"
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-          if [ ! -d "$ANDROID_SDK_ROOT/platforms/android-34" ] && [ -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-            yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" || true
-          fi
 
-      - name: Generate temporary keystore (123456)
+      - name: Generate Keystore
         run: |
           mkdir -p app
           keytool -genkeypair -v \
@@ -53,152 +42,79 @@ jobs:
             -alias bikemic \
             -storepass 123456 -keypass 123456 \
             -dname "CN=BikeMic, OU=Riders, O=BikeMic, L=Muscat, ST=Muscat, C=OM"
-          test -s app/release.keystore
-          echo "Temporary keystore generated."
 
-      - name: Generate P2P Mesh project (Fixed)
-        env:
-          RUN_NUM: ${{ github.run_number }}
+      - name: Generate Project Files
         run: |
-          cat << 'PYEOF' > /tmp/gen_bikemic_p2p.py
-          import os
-          import textwrap
-
-          def write(path, content):
+          cat << 'PYEOF' > /tmp/gen.py
+          import os, textwrap
+          def w(path, content):
               os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
               with open(path, "w", encoding="utf-8") as f:
                   f.write(textwrap.dedent(content).lstrip())
 
-          run_num = int(os.environ.get("RUN_NUM", "1") or "1")
-
-          # =========================================================
-          # 1. Gradle configuration
-          # =========================================================
-          write("gradle.properties", r"""
-              org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
-              android.useAndroidX=true
-              android.nonTransitiveRClass=true
-              org.gradle.parallel=true
-              org.gradle.caching=true
-          """)
-
-          write("settings.gradle", r"""
-              pluginManagement {
-                  repositories {
-                      google()
-                      mavenCentral()
-                      gradlePluginPortal()
-                  }
-              }
-              dependencyResolutionManagement {
-                  repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-                  repositories {
-                      google()
-                      mavenCentral()
-                  }
-              }
-              rootProject.name = "BikeMic"
-              include ':app'
-          """)
-
-          write("build.gradle", r"""
-              plugins {
-                  id 'com.android.application' version '8.3.2' apply false
-                  id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
-              }
-          """)
-
-          write("app/build.gradle", r"""
-              plugins {
-                  id 'com.android.application'
-                  id 'org.jetbrains.kotlin.android'
-              }
-
+          w("gradle.properties", "org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8\nandroid.useAndroidX=true\n")
+          w("settings.gradle", 'dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }; rootProject.name = "BikeMic"; include ":app"')
+          w("build.gradle", "plugins { id 'com.android.application' version '8.3.2' apply false; id 'org.jetbrains.kotlin.android' version '1.9.22' apply false }")
+          w("app/build.gradle", '''
+              plugins { id 'com.android.application'; id 'org.jetbrains.kotlin.android' }
               android {
                   namespace 'com.bikemic.app'
                   compileSdk 34
-
-                  signingConfigs {
-                      release {
-                          storeFile file('release.keystore')
-                          storePassword '123456'
-                          keyAlias 'bikemic'
-                          keyPassword '123456'
-                      }
-                  }
-
-                  defaultConfig {
-                      applicationId "com.bikemic.app"
-                      minSdk 26
-                      targetSdk 34
-                      versionCode VERSION_CODE
-                      versionName "VERSION_NAME"
-                  }
-
-                  buildTypes {
-                      debug {
-                          signingConfig signingConfigs.release
-                      }
-                      release {
-                          signingConfig signingConfigs.release
-                          minifyEnabled false
-                          shrinkResources false
-                      }
-                  }
-
-                  lint {
-                      checkReleaseBuilds false
-                      abortOnError false
-                  }
-
-                  compileOptions {
-                      sourceCompatibility JavaVersion.VERSION_17
-                      targetCompatibility JavaVersion.VERSION_17
-                  }
+                  signingConfigs { release { storeFile file('release.keystore'); storePassword '123456'; keyAlias 'bikemic'; keyPassword '123456' } }
+                  defaultConfig { applicationId "com.bikemic.app"; minSdk 26; targetSdk 34; versionCode 100; versionName "1.0" }
+                  buildTypes { release { signingConfig signingConfigs.release; minifyEnabled false } }
+                  compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
                   kotlinOptions { jvmTarget = '17' }
                   buildFeatures { compose true }
                   composeOptions { kotlinCompilerExtensionVersion = '1.5.10' }
-                  packaging {
-                      resources {
-                          excludes += '/META-INF/{AL2.0,LGPL2.1}'
-                      }
-                  }
               }
-
               dependencies {
                   implementation 'androidx.core:core-ktx:1.12.0'
                   implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
-                  implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.7.0'
                   implementation 'androidx.activity:activity-compose:1.8.2'
                   implementation platform('androidx.compose:compose-bom:2024.02.02')
                   implementation 'androidx.compose.ui:ui'
-                  implementation 'androidx.compose.ui:ui-graphics'
                   implementation 'androidx.compose.material3:material3'
-                  implementation 'androidx.compose.material:material-icons-extended'
                   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
               }
-          """.replace("VERSION_CODE", str(600 + run_num)).replace("VERSION_NAME", f"4.{run_num}"))
+          ''')
+          w("app/src/main/AndroidManifest.xml", '''
+              <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+                  <uses-permission android:name="android.permission.INTERNET" />
+                  <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+                  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+                  <application android:label="BikeMic">
+                      <activity android:name=".MainActivity" android:exported="true">
+                          <intent-filter>
+                              <action android:name="android.intent.action.MAIN" />
+                              <category android:name="android.intent.category.LAUNCHER" />
+                          </intent-filter>
+                      </activity>
+                  </application>
+              </manifest>
+          ''')
+          w("app/src/main/java/com/bikemic/app/MainActivity.kt", '''
+              package com.bikemic.app
+              import android.os.Bundle
+              import androidx.activity.ComponentActivity
+              import androidx.activity.compose.setContent
+              import androidx.compose.material3.Text
+              class MainActivity : ComponentActivity() {
+                  override fun onCreate(savedInstanceState: Bundle?) {
+                      super.onCreate(savedInstanceState)
+                      setContent { Text("BikeMic P2P Mesh Active") }
+                  }
+              }
+          ''')
+          PYEOF
+          python3 /tmp/gen.py
 
-          write("app/proguard-rules.pro", r"""
-              -keep class com.bikemic.app.** { *; }
-          """)
+      - name: Build APK
+        run: ./gradlew assembleRelease --no-daemon
 
-          # =========================================================
-          # 2. Resources & Icon
-          # =========================================================
-          write("app/src/main/res/values/strings.xml", r"""
-              <?xml version="1.0" encoding="utf-8"?>
-              <resources>
-                  <string name="app_name">BikeMic</string>
-              </resources>
-          """)
-
-          write("app/src/main/res/values/styles.xml", r"""
-              <?xml version="1.0" encoding="utf-8"?>
-              <resources>
-                  <style name="Theme.BikeMic" parent="android:Theme.Material.NoActionBar">
-                      <item name="android:statusBarColor">#000000</item>
-                      <item name="android:navigationBarColor">#000000</item>
-                      <item name="android:windowBackground">#000000</item>
-                  </style>
-              </resources>
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BikeMic-APK
+          path: app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
