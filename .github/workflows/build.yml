@@ -1,4 +1,4 @@
-name: Build BikeMic P2P Mesh APK (Diagnostics)
+name: Build BikeMic P2P Mesh APK (Fixed & Optimized)
 
 on:
   push:
@@ -32,12 +32,16 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Prepare Android SDK
+      - name: Prepare Android SDK & Licenses
         run: |
           export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           mkdir -p "$ANDROID_SDK_ROOT/licenses"
           printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
+          printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-preview-license"
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          if [ -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" || true
+          fi
 
       - name: Generate temporary keystore (123456)
         run: |
@@ -52,7 +56,7 @@ jobs:
           test -s app/release.keystore
           echo "Temporary keystore generated."
 
-      - name: Generate P2P Mesh project with Diagnostics
+      - name: Generate P2P Mesh project (Fixed)
         env:
           RUN_NUM: ${{ github.run_number }}
         run: |
@@ -168,7 +172,7 @@ jobs:
                   implementation 'androidx.compose.material:material-icons-extended'
                   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
               }
-          """.replace("VERSION_CODE", str(500 + run_num)).replace("VERSION_NAME", f"3.{run_num}"))
+          """.replace("VERSION_CODE", str(600 + run_num)).replace("VERSION_NAME", f"4.{run_num}"))
 
           write("app/proguard-rules.pro", """
               -keep class com.bikemic.app.** { *; }
@@ -248,7 +252,7 @@ jobs:
           """)
 
           # =========================================================
-          # 3. AndroidManifest (WiFi + Audio)
+          # 3. AndroidManifest
           # =========================================================
           write("app/src/main/AndroidManifest.xml", """
               <?xml version="1.0" encoding="utf-8"?>
@@ -262,6 +266,7 @@ jobs:
                   <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
                       android:usesPermissionFlags="neverForLocation" />
                   <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+                  <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
                   <uses-permission android:name="android.permission.RECORD_AUDIO" />
                   <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
                   <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -391,15 +396,15 @@ jobs:
           """)
 
           # =========================================================
-          # 6. LeaderElection.kt
+          # 6. LeaderElection.kt (Fixed self-comparison bug)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/LeaderElection.kt", """
               package com.bikemic.app
 
               class LeaderElection(
                   private val selfId: Long,
-                  private val minBattery: Int = 30,
-                  private val thermalHoldMs: Long = 30_000L
+                  private val minBattery: Int = 25,
+                  private val thermalHoldMs: Long = 25_000L
               ) {
                   @Volatile var currentHostId: Long = selfId
                       private set
@@ -409,15 +414,15 @@ jobs:
                   private var thermalHighSinceMs: Long = 0L
                   private var lowBatSinceMs: Long = 0L
 
-                  fun healthScore(p: PeerInfo): Double {
-                      var s = p.batteryPct.toDouble()
-                      when (p.thermalStatus) {
+                  fun healthScore(bat: Int, chg: Boolean, thermal: Int): Double {
+                      var s = bat.toDouble()
+                      when (thermal) {
                           DeviceHealthMonitor.THERMAL_CRITICAL -> return -1000.0
                           DeviceHealthMonitor.THERMAL_SEVERE -> s -= 60.0
                           DeviceHealthMonitor.THERMAL_MODERATE -> s -= 30.0
                           DeviceHealthMonitor.THERMAL_LIGHT -> s -= 8.0
                       }
-                      if (p.isCharging) s += 20.0
+                      if (chg) s += 20.0
                       return s
                   }
 
@@ -438,15 +443,17 @@ jobs:
                       return false
                   }
 
-                  fun selectNewHost(peers: Collection<PeerInfo>): PeerInfo? {
-                      if (peers.isEmpty()) return null
-                      return peers
+                  fun pickBestLeader(selfPeer: PeerInfo, peers: Collection<PeerInfo>, excludeId: Long = -1L): PeerInfo? {
+                      val all = ArrayList<PeerInfo>(peers.size + 1)
+                      all.add(selfPeer)
+                      all.addAll(peers.filter { it.handshakeOk })
+                      return all
                           .asSequence()
-                          .filter { it.nodeId != selfId }
+                          .filter { it.nodeId != excludeId }
                           .filter { it.thermalStatus < DeviceHealthMonitor.THERMAL_CRITICAL }
                           .sortedWith(
-                              compareByDescending<PeerInfo> { healthScore(it) }
-                                  .thenByDescending { it.epoch }
+                              compareBy<PeerInfo> { it.chainRank }
+                                  .thenByDescending { healthScore(it.batteryPct, it.isCharging, it.thermalStatus) }
                                   .thenBy { it.nodeId }
                           )
                           .firstOrNull()
@@ -462,16 +469,16 @@ jobs:
                       return false
                   }
 
-                  fun declareSelfAsHost(): Pair<Long, Long> {
+                  fun declareSelfAsHost(minEpoch: Long = currentEpoch): Pair<Long, Long> {
                       currentHostId = selfId
-                      currentEpoch += 1
+                      currentEpoch = maxOf(currentEpoch, minEpoch) + 1L
                       return selfId to currentEpoch
                   }
               }
           """)
 
           # =========================================================
-          # 7. MeshVoiceEngine.kt (Updated with diagnostics)
+          # 7. MeshVoiceEngine.kt (Unicast + Gateway + Multicast + Gossip + Relay)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/MeshVoiceEngine.kt", """
               package com.bikemic.app
@@ -485,16 +492,22 @@ jobs:
               import android.media.MediaRecorder
               import android.media.audiofx.AcousticEchoCanceler
               import android.media.audiofx.NoiseSuppressor
+              import android.net.ConnectivityManager
               import android.net.wifi.WifiManager
               import androidx.compose.runtime.mutableIntStateOf
               import androidx.compose.runtime.mutableLongStateOf
               import androidx.compose.runtime.mutableStateOf
               import kotlinx.coroutines.*
+              import org.json.JSONArray
               import org.json.JSONObject
+              import java.io.BufferedReader
+              import java.io.FileReader
               import java.net.DatagramPacket
               import java.net.DatagramSocket
+              import java.net.Inet4Address
               import java.net.InetAddress
               import java.net.InetSocketAddress
+              import java.net.MulticastSocket
               import java.net.NetworkInterface
               import java.nio.ByteBuffer
               import java.util.Collections
@@ -507,12 +520,14 @@ jobs:
                   companion object {
                       private const val DISCOVERY_PORT = 50004
                       private const val AUDIO_PORT = 50005
+                      private const val MULTICAST_GROUP = "239.255.42.99"
                       private const val SAMPLE_RATE = 16000
                       private const val FRAME_BYTES = 640
                       private const val MAGIC_AUDIO: Byte = 0x42
+                      private const val HEADER_SIZE = 15 // 1 magic + 8 id + 4 seq + 1 rank + 1 ttl
                   }
 
-                  val selfId: Long = Random.nextLong(1, Long.MAX_VALUE)
+                  val selfId: Long = Random.nextLong(100_000L, Long.MAX_VALUE)
                   @Volatile var userName: String = "أبو ناصر"
                   @Volatile var chainRank: Int = 1
                   @Volatile var isPttPressed: Boolean = false
@@ -528,19 +543,24 @@ jobs:
                   val connectedCount = mutableIntStateOf(0)
                   val currentHostIdState = mutableLongStateOf(selfId)
                   val currentEpochState = mutableLongStateOf(0L)
-                  val statusText = mutableStateOf("جارٍ البحث عن دراجين آخرين...")
+                  val statusText = mutableStateOf("جارٍ البحث عن دراجين على الشبكة...")
                   val activeSpeakerName = mutableStateOf<String?>(null)
                   val leaderChangeEvent = mutableStateOf<String?>(null)
 
                   // Diagnostics
                   val debugSentCount = mutableIntStateOf(0)
                   val debugReceivedCount = mutableIntStateOf(0)
+                  val debugLastError = mutableStateOf("لا توجد أخطاء")
+                  @Volatile private var cachedIfacesInfo: List<Pair<String, String>> = emptyList()
+                  @Volatile private var cachedTargetIps: Set<InetAddress> = emptySet()
+                  @Volatile private var cachedLocalIps: Set<String> = emptySet()
 
                   val peersMap = ConcurrentHashMap<Long, PeerInfo>()
-                  private val handshakedPeers = Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
+                  private val knownHintIps = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
                   private val seenAudio = Collections.synchronizedMap(
-                      object : LinkedHashMap<Long, Boolean>(512, 0.75f, true) {
-                          override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Boolean>?) = size > 600
+                      object : LinkedHashMap<Long, Boolean>(1024, 0.75f, true) {
+                          override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Boolean>?) = size > 900
                       }
                   )
 
@@ -549,37 +569,58 @@ jobs:
 
                   private val election = LeaderElection(selfId)
                   private var multicastLock: WifiManager.MulticastLock? = null
-                  private var discoverySocket: DatagramSocket? = null
-                  private var audioSocket: DatagramSocket? = null
+                  private var wifiLock: WifiManager.WifiLock? = null
+
+                  @Volatile private var discoverySocket: DatagramSocket? = null
+                  @Volatile private var multicastSocket: MulticastSocket? = null
+                  @Volatile private var audioSocket: DatagramSocket? = null
 
                   fun start() {
-                      val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                      multicastLock = wifi.createMulticastLock("BikeMicP2P").apply {
-                          setReferenceCounted(true)
-                          acquire()
-                      }
-                      val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                      am.mode = AudioManager.MODE_IN_COMMUNICATION
-                      am.isSpeakerphoneOn = true
+                      runCatching {
+                          val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                          multicastLock = wifi.createMulticastLock("BikeMicMulticast").apply {
+                              setReferenceCounted(false)
+                              acquire()
+                          }
+                          wifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "BikeMicWifi").apply {
+                              setReferenceCounted(false)
+                              acquire()
+                          }
+                      }.onFailure { debugLastError.value = "WifiLock: ${it.message}" }
 
-                      startDiscovery()
-                      startAudioReceiver()
-                      startAudioTransmitter()
-                      startHeartbeat()
-                      startElectionLoop()
+                      runCatching {
+                          val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                          am.mode = AudioManager.MODE_IN_COMMUNICATION
+                          am.isSpeakerphoneOn = true
+                      }
+
+                      scope.launch {
+                          refreshNetworkTopology()
+                          val sockReady = initDiscoverySockets()
+                          if (sockReady) {
+                              startDiscoveryReceiver()
+                              startMulticastReceiver()
+                              startHeartbeatLoop()
+                              startElectionLoop()
+                          }
+                          startAudioEngine()
+                      }
                   }
 
                   fun stop() {
                       scope.cancel()
                       runCatching { discoverySocket?.close() }
+                      runCatching { multicastSocket?.close() }
                       runCatching { audioSocket?.close() }
                       runCatching { if (multicastLock?.isHeld == true) multicastLock?.release() }
+                      runCatching { if (wifiLock?.isHeld == true) wifiLock?.release() }
                   }
 
                   fun updateUser(newName: String, newRank: Int) {
                       userName = newName
                       chainRank = newRank
                       peersVersion.intValue += 1
+                      scope.launch { sendHeartbeatNow() }
                   }
 
                   fun updateHealth(bat: Int, chg: Boolean, thermal: Int) {
@@ -589,242 +630,438 @@ jobs:
                       peersVersion.intValue += 1
                   }
 
-                  fun getDebugInterfaces(): List<Pair<String, String>> {
-                      val list = mutableListOf<Pair<String, String>>()
-                      runCatching {
-                          val ifaces = NetworkInterface.getNetworkInterfaces()
-                          while (ifaces.hasMoreElements()) {
-                              val nif = ifaces.nextElement()
-                              if (!nif.isUp || nif.isLoopback) continue
-                              val name = nif.name.lowercase()
-                              if (name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("pdp")) continue
-                              for (ia in nif.interfaceAddresses) {
-                                  if (ia.address is java.net.Inet4Address) {
-                                      list.add(nif.name to (ia.address.hostAddress ?: ""))
-                                  }
-                              }
-                          }
-                      }
-                      return list
+                  fun getDebugInterfaces(): List<Pair<String, String>> = cachedIfacesInfo
+
+                  fun getDebugBroadcasts(): List<String> = cachedTargetIps.mapNotNull { it.hostAddress }.sorted()
+
+                  private fun isIgnoredInterface(name: String): Boolean {
+                      val n = name.lowercase()
+                      return n.startsWith("rmnet") || n.startsWith("ccmni") ||
+                             n.startsWith("pdp") || n.startsWith("dummy") ||
+                             n.startsWith("tun") || n.startsWith("ppp") ||
+                             n.startsWith("clat") || n.startsWith("v4-") || n.startsWith("lo")
                   }
 
-                  fun getDebugBroadcasts(): List<String> {
-                      return getBroadcastAddresses().mapNotNull { it.hostAddress }
-                  }
+                  private fun refreshNetworkTopology() {
+                      val targets = LinkedHashSet<InetAddress>()
+                      val localIps = HashSet<String>()
+                      val ifaceList = ArrayList<Pair<String, String>>()
 
-                  private fun getBroadcastAddresses(): List<InetAddress> {
-                      val set = mutableSetOf<InetAddress>()
+                      // 1. Active WiFi / Hotspot / Tethering interfaces
                       runCatching {
                           val ifaces = NetworkInterface.getNetworkInterfaces()
-                          while (ifaces.hasMoreElements()) {
+                          while (ifaces != null && ifaces.hasMoreElements()) {
                               val nif = ifaces.nextElement()
-                              if (!nif.isUp || nif.isLoopback) continue
-                              val name = nif.name.lowercase()
-                              if (name.startsWith("rmnet") || name.startsWith("ccmni") ||
-                                  name.startsWith("pdp") || name.startsWith("dummy") ||
-                                  name.startsWith("tun") || name.startsWith("ppp")) continue
+                              if (!nif.isUp || nif.isLoopback || isIgnoredInterface(nif.name)) continue
 
                               for (ia in nif.interfaceAddresses) {
-                                  if (ia.address is java.net.Inet4Address) {
-                                      ia.broadcast?.let { set.add(it) }
-                                      val prefix = ia.networkPrefixLength
-                                      if (prefix in 1..31) {
-                                          val ipBytes = ia.address.address
-                                          val ipInt = ((ipBytes[0].toInt() and 0xFF) shl 24) or
-                                                      ((ipBytes[1].toInt() and 0xFF) shl 16) or
-                                                      ((ipBytes[2].toInt() and 0xFF) shl 8) or
-                                                      (ipBytes[3].toInt() and 0xFF)
+                                  val addr = ia.address
+                                  if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                                      val ipStr = addr.hostAddress ?: continue
+                                      localIps.add(ipStr)
+                                      ifaceList.add(nif.name to ipStr)
+
+                                      ia.broadcast?.let { targets.add(it) }
+
+                                      val prefix = ia.networkPrefixLength.toInt()
+                                      if (prefix in 8..30) {
+                                          val b = addr.address
+                                          val ipInt = ((b[0].toInt() and 0xFF) shl 24) or
+                                                      ((b[1].toInt() and 0xFF) shl 16) or
+                                                      ((b[2].toInt() and 0xFF) shl 8) or
+                                                      (b[3].toInt() and 0xFF)
                                           val mask = -1 shl (32 - prefix)
                                           val bcastInt = (ipInt and mask) or mask.inv()
-                                          val bcast = byteArrayOf(
+                                          val bcastBytes = byteArrayOf(
                                               (bcastInt ushr 24).toByte(),
                                               (bcastInt ushr 16).toByte(),
                                               (bcastInt ushr 8).toByte(),
                                               bcastInt.toByte()
                                           )
-                                          runCatching { set.add(InetAddress.getByAddress(bcast)) }
-                                      }
-                                      val ipStr = ia.address.hostAddress ?: ""
-                                      if (ipStr.startsWith("192.168.") || ipStr.startsWith("172.") || ipStr.startsWith("10.")) {
-                                          val parts = ipStr.split(".")
-                                          if (parts.size == 4) {
-                                              val prefix3 = "${parts[0]}.${parts[1]}.${parts[2]}"
-                                              listOf("1", "2").forEach { last ->
-                                                  runCatching { set.add(InetAddress.getByName("$prefix3.$last")) }
-                                              }
-                                          }
+                                          runCatching { targets.add(InetAddress.getByAddress(bcastBytes)) }
+
+                                          // Gateway .1 in same /24 subnet
+                                          val gwBytes = byteArrayOf(b[0], b[1], b[2], 1)
+                                          val gwAddr = InetAddress.getByAddress(gwBytes)
+                                          if (gwAddr.hostAddress != ipStr) targets.add(gwAddr)
                                       }
                                   }
                               }
                           }
                       }
-                      runCatching { set.add(InetAddress.getByName("255.255.255.255")) }
-                      return set.toList()
+
+                      // 2. Real Gateway IP from ConnectivityManager (Crucial for Android 10+ randomized Hotspot IP!)
+                      runCatching {
+                          val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                          for (net in cm.allNetworks) {
+                              val lp = cm.getLinkProperties(net) ?: continue
+                              val ifName = lp.interfaceName ?: ""
+                              if (ifName.isNotEmpty() && isIgnoredInterface(ifName)) continue
+                              for (route in lp.routes) {
+                                  val gw = route.gateway
+                                  if (gw is Inet4Address && !gw.isLoopbackAddress && !gw.isAnyLocalAddress) {
+                                      val gwStr = gw.hostAddress ?: ""
+                                      if (gwStr !in localIps) targets.add(gw)
+                                  }
+                              }
+                          }
+                      }
+
+                      // 3. WiFi DHCP Gateway fallback
+                      runCatching {
+                          val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                          @Suppress("DEPRECATION")
+                          val dhcp = wifi.dhcpInfo
+                          if (dhcp != null && dhcp.gateway != 0) {
+                              val g = dhcp.gateway
+                              val gwBytes = byteArrayOf(
+                                  (g and 0xFF).toByte(),
+                                  ((g shr 8) and 0xFF).toByte(),
+                                  ((g shr 16) and 0xFF).toByte(),
+                                  ((g shr 24) and 0xFF).toByte()
+                              )
+                              val gwAddr = InetAddress.getByAddress(gwBytes)
+                              if (gwAddr.hostAddress !in localIps) targets.add(gwAddr)
+                          }
+                      }
+
+                      // 4. Read ARP neighbors table (Hotspot host sees connected clients immediately if readable)
+                      runCatching {
+                          BufferedReader(FileReader("/proc/net/arp")).use { br ->
+                              var line = br.readLine()
+                              while (line != null) {
+                                  val parts = line.trim().split(Regex("\\s+"))
+                                  if (parts.size >= 6) {
+                                      val ip = parts[0]
+                                      val dev = parts[5]
+                                      if (ip.matches(Regex("\\d+\\.\\d+\\.\\d+\\.\\d+")) &&
+                                          ip != "0.0.0.0" && ip !in localIps && !isIgnoredInterface(dev)) {
+                                          runCatching { targets.add(InetAddress.getByName(ip)) }
+                                      }
+                                  }
+                                  line = br.readLine()
+                              }
+                          }
+                      }
+
+                      // 5. Known peers + Gossip hints + Multicast + Global broadcast
+                      peersMap.values.forEach { p ->
+                          if (p.ipAddress.isNotEmpty() && p.ipAddress !in localIps) {
+                              runCatching { targets.add(InetAddress.getByName(p.ipAddress)) }
+                          }
+                      }
+                      knownHintIps.forEach { ip ->
+                          if (ip !in localIps) {
+                              runCatching { targets.add(InetAddress.getByName(ip)) }
+                          }
+                      }
+
+                      runCatching { targets.add(InetAddress.getByName(MULTICAST_GROUP)) }
+                      runCatching { targets.add(InetAddress.getByName("255.255.255.255")) }
+
+                      cachedLocalIps = localIps
+                      cachedIfacesInfo = ifaceList
+                      cachedTargetIps = targets
                   }
 
-                  private fun broadcastJson(obj: JSONObject) {
-                      val data = obj.toString().toByteArray(Charsets.UTF_8)
-                      val sock = discoverySocket ?: return
-                      for (b in getBroadcastAddresses()) {
+                  private fun initDiscoverySockets(): Boolean {
+                      return try {
+                          discoverySocket = DatagramSocket(null).apply {
+                              reuseAddress = true
+                              broadcast = true
+                              bind(InetSocketAddress(DISCOVERY_PORT))
+                          }
                           runCatching {
-                              sock.send(DatagramPacket(data, data.size, b, DISCOVERY_PORT))
+                              val group = InetAddress.getByName(MULTICAST_GROUP)
+                              val ms = MulticastSocket(DISCOVERY_PORT).apply {
+                                  reuseAddress = true
+                                  timeToLive = 4
+                              }
+                              var joinedAny = false
+                              val ifaces = NetworkInterface.getNetworkInterfaces()
+                              while (ifaces != null && ifaces.hasMoreElements()) {
+                                  val nif = ifaces.nextElement()
+                                  if (nif.isUp && !nif.isLoopback && nif.supportsMulticast() && !isIgnoredInterface(nif.name)) {
+                                      runCatching {
+                                          ms.joinGroup(InetSocketAddress(group, DISCOVERY_PORT), nif)
+                                          joinedAny = true
+                                      }
+                                  }
+                              }
+                              if (!joinedAny) {
+                                  @Suppress("DEPRECATION")
+                                  runCatching { ms.joinGroup(group) }
+                              }
+                              multicastSocket = ms
+                          }
+                          true
+                      } catch (e: Exception) {
+                          debugLastError.value = "فشل فتح منفذ الشبكة: ${e.message}"
+                          false
+                      }
+                  }
+
+                  private fun sendUnicastJson(obj: JSONObject, targetAddr: InetAddress) {
+                      val sock = discoverySocket ?: return
+                      val data = obj.toString().toByteArray(Charsets.UTF_8)
+                      runCatching {
+                          sock.send(DatagramPacket(data, data.size, targetAddr, DISCOVERY_PORT))
+                          debugSentCount.intValue += 1
+                      }
+                  }
+
+                  private fun sendToAllDiscoveryTargets(obj: JSONObject) {
+                      val sock = discoverySocket ?: return
+                      val data = obj.toString().toByteArray(Charsets.UTF_8)
+                      for (target in cachedTargetIps) {
+                          runCatching {
+                              sock.send(DatagramPacket(data, data.size, target, DISCOVERY_PORT))
                               debugSentCount.intValue += 1
                           }
                       }
                   }
 
-                  private fun startDiscovery() {
+                  private fun buildSelfHeartbeatJson(type: String = "HB"): JSONObject {
+                      val peersArr = JSONArray()
+                      peersMap.values.forEach { p ->
+                          if (p.ipAddress.isNotEmpty()) {
+                              peersArr.put(JSONObject().apply {
+                                  put("id", p.nodeId)
+                                  put("ip", p.ipAddress)
+                                  put("name", p.name)
+                                  put("rank", p.chainRank)
+                              })
+                          }
+                      }
+                      return JSONObject().apply {
+                          put("t", type)
+                          put("id", selfId)
+                          put("name", userName)
+                          put("rank", chainRank)
+                          put("bat", batteryPct)
+                          put("chg", isCharging)
+                          put("thm", thermalStatus)
+                          put("epoch", election.currentEpoch)
+                          put("host", election.currentHostId)
+                          put("peers", peersArr)
+                      }
+                  }
+
+                  private fun sendHeartbeatNow() {
+                      refreshNetworkTopology()
+                      sendToAllDiscoveryTargets(buildSelfHeartbeatJson("HB"))
+                  }
+
+                  private fun startDiscoveryReceiver() {
                       scope.launch {
-                          runCatching {
-                              discoverySocket = DatagramSocket(null).apply {
-                                  reuseAddress = true
-                                  broadcast = true
-                                  bind(InetSocketAddress(DISCOVERY_PORT))
-                              }
-                              val buf = ByteArray(1024)
-                              while (isActive) {
+                          val buf = ByteArray(4096)
+                          while (isActive) {
+                              try {
                                   val pkt = DatagramPacket(buf, buf.size)
                                   discoverySocket?.receive(pkt) ?: break
                                   handleDiscoveryPacket(pkt)
+                              } catch (e: Exception) {
+                                  if (isActive) delay(200)
+                              }
+                          }
+                      }
+                  }
+
+                  private fun startMulticastReceiver() {
+                      val ms = multicastSocket ?: return
+                      scope.launch {
+                          val buf = ByteArray(4096)
+                          while (isActive) {
+                              try {
+                                  val pkt = DatagramPacket(buf, buf.size)
+                                  ms.receive(pkt)
+                                  handleDiscoveryPacket(pkt)
+                              } catch (e: Exception) {
+                                  if (isActive) delay(300)
                               }
                           }
                       }
                   }
 
                   private fun handleDiscoveryPacket(pkt: DatagramPacket) {
-                      debugReceivedCount.intValue += 1
                       runCatching {
                           val text = String(pkt.data, 0, pkt.length, Charsets.UTF_8)
                           val msg = JSONObject(text)
-                          val senderId = msg.optLong("id", -1)
-                          if (senderId <= 0 || senderId == selfId) return
+                          val senderId = msg.optLong("id", -1L)
+                          if (senderId <= 0L || senderId == selfId) return // Ignore own echo!
 
-                          when (msg.optString("t")) {
-                              "HB" -> {
+                          // Genuine packet from another rider!
+                          debugReceivedCount.intValue += 1
+
+                          val senderIp = pkt.address.hostAddress ?: ""
+                          if (senderIp.isNotEmpty() && senderIp !in cachedLocalIps) {
+                              knownHintIps.add(senderIp)
+                          }
+
+                          val type = msg.optString("t")
+                          when (type) {
+                              "HB", "DIRECT_ACK" -> {
+                                  val existed = peersMap[senderId]
                                   val peer = PeerInfo(
                                       nodeId = senderId,
-                                      name = msg.optString("name", "راكب"),
-                                      chainRank = msg.optInt("rank", 2),
-                                      batteryPct = msg.optInt("bat", 50),
-                                      isCharging = msg.optBoolean("chg", false),
-                                      thermalStatus = msg.optInt("thm", 0),
-                                      epoch = msg.optLong("epoch", 0),
+                                      name = msg.optString("name", existed?.name ?: "راكب"),
+                                      chainRank = msg.optInt("rank", existed?.chainRank ?: 2),
+                                      batteryPct = msg.optInt("bat", existed?.batteryPct ?: 100),
+                                      isCharging = msg.optBoolean("chg", existed?.isCharging ?: false),
+                                      thermalStatus = msg.optInt("thm", existed?.thermalStatus ?: 0),
+                                      epoch = msg.optLong("epoch", existed?.epoch ?: 0L),
                                       currentHostId = msg.optLong("host", senderId),
-                                      ipAddress = pkt.address.hostAddress ?: "",
+                                      ipAddress = senderIp,
                                       lastSeenMs = System.currentTimeMillis(),
-                                      handshakeOk = handshakedPeers.contains(senderId)
+                                      handshakeOk = true
                                   )
                                   peersMap[senderId] = peer
-
-                                  if (!handshakedPeers.contains(senderId)) {
-                                      val req = JSONObject().apply {
-                                          put("t", "CONNECT_REQ")
-                                          put("id", selfId)
-                                          put("name", userName)
-                                      }
-                                      broadcastJson(req)
-                                  }
                                   if (selectAllPeers) allowedPeerIds.add(senderId)
-                                  peersVersion.intValue += 1
-                              }
-                              "CONNECT_REQ" -> {
-                                  handshakedPeers.add(senderId)
-                                  val ack = JSONObject().apply {
-                                      put("t", "CONNECT_ACK")
-                                      put("id", selfId)
+
+                                  // Adopt higher epoch/host automatically so all riders agree on leader
+                                  val remoteHost = msg.optLong("host", -1L)
+                                  val remoteEpoch = msg.optLong("epoch", 0L)
+                                  if (remoteHost > 0L && election.acceptHostAnnouncement(remoteHost, remoteEpoch)) {
+                                      currentHostIdState.longValue = election.currentHostId
+                                      currentEpochState.longValue = election.currentEpoch
                                   }
-                                  broadcastJson(ack)
+
+                                  // Gossip: learn other riders attached to the same hotspot!
+                                  val gossipArr = msg.optJSONArray("peers")
+                                  if (gossipArr != null) {
+                                      for (i in 0 until gossipArr.length()) {
+                                          val gp = gossipArr.optJSONObject(i) ?: continue
+                                          val gId = gp.optLong("id", -1L)
+                                          val gIp = gp.optString("ip", "")
+                                          if (gId > 0L && gId != selfId && gIp.isNotEmpty() && gIp !in cachedLocalIps) {
+                                              if (knownHintIps.add(gIp) || !peersMap.containsKey(gId)) {
+                                                  runCatching {
+                                                      sendUnicastJson(buildSelfHeartbeatJson("HB"), InetAddress.getByName(gIp))
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }
+
+                                  // Immediate Unicast reply back to sender so both sides connect instantly
+                                  if (type == "HB" || existed == null || !existed.handshakeOk) {
+                                      sendUnicastJson(buildSelfHeartbeatJson("DIRECT_ACK"), pkt.address)
+                                  }
+
+                                  updateUiCounters()
                               }
-                              "CONNECT_ACK" -> {
-                                  handshakedPeers.add(senderId)
-                                  peersVersion.intValue += 1
-                              }
+
                               "STEP_DOWN" -> {
-                                  val epoch = msg.optLong("epoch", 0)
+                                  val epoch = msg.optLong("epoch", 0L)
                                   if (epoch >= election.currentEpoch) {
                                       statusText.value = "القائد السابق يتنازل... جارٍ انتخاب قائد جديد"
                                   }
                               }
+
                               "I_AM_HOST" -> {
-                                  val newHost = msg.optLong("id", -1)
-                                  val epoch = msg.optLong("epoch", 0)
-                                  if (newHost > 0 && election.acceptHostAnnouncement(newHost, epoch)) {
+                                  val newHost = msg.optLong("id", -1L)
+                                  val epoch = msg.optLong("epoch", 0L)
+                                  if (newHost > 0L && election.acceptHostAnnouncement(newHost, epoch)) {
                                       currentHostIdState.longValue = election.currentHostId
                                       currentEpochState.longValue = election.currentEpoch
-                                      val hostName = peersMap[newHost]?.name ?: "راكب"
+                                      val hostName = if (newHost == selfId) userName else (peersMap[newHost]?.name ?: "راكب")
                                       leaderChangeEvent.value = "القائد الجديد: $hostName"
                                       statusText.value = "متصل • القائد: $hostName"
                                   }
                               }
                           }
+                      }.onFailure {
+                          debugLastError.value = "Parse: ${it.message}"
                       }
                   }
 
-                  private fun startHeartbeat() {
+                  private fun updateUiCounters() {
+                      val live = peersMap.values.count { it.handshakeOk }
+                      connectedCount.intValue = live
+                      peersVersion.intValue += 1
+                      if (live > 0) {
+                          val hostId = election.currentHostId
+                          val hostName = if (hostId == selfId) "أنت" else (peersMap[hostId]?.name ?: "راكب")
+                          statusText.value = "متصل ($live) • القائد: $hostName"
+                      } else {
+                          statusText.value = "جارٍ البحث... (اتصل بنفس الهوتسبوت أو الراوتر)"
+                      }
+                  }
+
+                  private fun startHeartbeatLoop() {
                       scope.launch {
                           while (isActive) {
                               runCatching {
-                                  val hb = JSONObject().apply {
-                                      put("t", "HB")
-                                      put("id", selfId)
-                                      put("name", userName)
-                                      put("rank", chainRank)
-                                      put("bat", batteryPct)
-                                      put("chg", isCharging)
-                                      put("thm", thermalStatus)
-                                      put("epoch", election.currentEpoch)
-                                      put("host", election.currentHostId)
-                                      put("ts", System.currentTimeMillis())
-                                  }
-                                  broadcastJson(hb)
+                                  sendHeartbeatNow()
 
                                   val now = System.currentTimeMillis()
-                                  val dead = peersMap.filterValues { now - it.lastSeenMs > 8000 }.keys
+                                  val dead = peersMap.filterValues { now - it.lastSeenMs > 9000L }.keys
                                   if (dead.isNotEmpty()) {
-                                      dead.forEach { peersMap.remove(it); handshakedPeers.remove(it) }
-                                      peersVersion.intValue += 1
+                                      dead.forEach { peersMap.remove(it) }
                                   }
-
-                                  val live = peersMap.values.count { it.handshakeOk }
-                                  connectedCount.intValue = live
-
-                                  if (live > 0) {
-                                      statusText.value = "متصل • $live دراج متصل"
-                                  } else {
-                                      statusText.value = "لا يوجد دراجون متصلون بعد (شارك الواي فاي/الهوتسبوت)"
-                                  }
+                                  updateUiCounters()
+                              }.onFailure {
+                                  debugLastError.value = "HB: ${it.message}"
                               }
-                              // Jitter to prevent broadcast collision
-                              delay(1500L + Random.nextLong(0, 500))
+                              delay(1400L + Random.nextLong(0L, 400L))
                           }
                       }
                   }
 
                   private fun startElectionLoop() {
                       scope.launch {
-                          var stepDownSentMs = 0L
+                          var stepDownOriginId = -1L
+                          var electionTriggerMs = 0L
+
                           while (isActive) {
                               val now = System.currentTimeMillis()
-                              val isHost = election.currentHostId == selfId
+                              val currentHost = election.currentHostId
+                              val hostMissing = currentHost != selfId && !peersMap.containsKey(currentHost)
 
-                              if (isHost && election.shouldStepDown(batteryPct, isCharging, thermalStatus, now)) {
-                                  if (stepDownSentMs == 0L) {
-                                      val reason = if (thermalStatus >= DeviceHealthMonitor.THERMAL_SEVERE) "THERMAL" else "BATTERY_LOW"
+                              // Initial rank-based leader alignment when peers connect
+                              if (peersMap.isNotEmpty() && election.currentEpoch == 0L && chainRank == 1 && currentHost != selfId) {
+                                  val (newHost, newEpoch) = election.declareSelfAsHost()
+                                  currentHostIdState.longValue = newHost
+                                  currentEpochState.longValue = newEpoch
+                                  val announce = JSONObject().apply {
+                                      put("t", "I_AM_HOST")
+                                      put("id", newHost)
+                                      put("epoch", newEpoch)
+                                  }
+                                  sendToAllDiscoveryTargets(announce)
+                              }
+
+                              if (currentHost == selfId && election.shouldStepDown(batteryPct, isCharging, thermalStatus, now)) {
+                                  if (electionTriggerMs == 0L) {
+                                      val reason = if (thermalStatus >= DeviceHealthMonitor.THERMAL_SEVERE) "حرارة مرتفعة" else "بطارية منخفضة"
                                       val sd = JSONObject().apply {
                                           put("t", "STEP_DOWN")
                                           put("id", selfId)
                                           put("epoch", election.currentEpoch)
                                           put("reason", reason)
                                       }
-                                      broadcastJson(sd)
-                                      stepDownSentMs = now
-                                      statusText.value = "تنازلت عن القيادة ($reason). بانتظار قائد جديد..."
+                                      sendToAllDiscoveryTargets(sd)
+                                      stepDownOriginId = selfId
+                                      electionTriggerMs = now
+                                      statusText.value = "تنازلت عن القيادة ($reason)..."
+                                  }
+                              } else if (hostMissing && peersMap.isNotEmpty()) {
+                                  if (electionTriggerMs == 0L) {
+                                      stepDownOriginId = currentHost
+                                      electionTriggerMs = now
                                   }
                               }
 
-                              if (stepDownSentMs > 0 && now - stepDownSentMs > 3000) {
-                                  val candidate = election.selectNewHost(peersMap.values)
-                                  if (candidate != null && candidate.nodeId == selfId) {
+                              if (electionTriggerMs > 0L && now - electionTriggerMs > 2000L) {
+                                  val selfPeer = PeerInfo(
+                                      nodeId = selfId, name = userName, chainRank = chainRank,
+                                      batteryPct = batteryPct, isCharging = isCharging,
+                                      thermalStatus = thermalStatus, epoch = election.currentEpoch,
+                                      currentHostId = election.currentHostId, ipAddress = "",
+                                      lastSeenMs = now, handshakeOk = true
+                                  )
+                                  val winner = election.pickBestLeader(selfPeer, peersMap.values, excludeId = stepDownOriginId)
+                                  if (winner != null && winner.nodeId == selfId) {
                                       val (newHost, newEpoch) = election.declareSelfAsHost()
                                       currentHostIdState.longValue = newHost
                                       currentEpochState.longValue = newEpoch
@@ -832,81 +1069,50 @@ jobs:
                                           put("t", "I_AM_HOST")
                                           put("id", newHost)
                                           put("epoch", newEpoch)
-                                          put("bat", batteryPct)
-                                          put("chg", isCharging)
-                                          put("thm", thermalStatus)
                                       }
-                                      broadcastJson(announce)
-                                      stepDownSentMs = 0L
+                                      sendToAllDiscoveryTargets(announce)
+                                      leaderChangeEvent.value = "أصبحت أنت قائد السلسلة"
                                   }
+                                  electionTriggerMs = 0L
+                                  stepDownOriginId = -1L
                               }
 
-                              delay(1000)
+                              delay(1000L)
                           }
                       }
                   }
 
-                  private fun startAudioTransmitter() {
-                      scope.launch {
-                          val minBuf = AudioRecord.getMinBufferSize(
-                              SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-                          ).coerceAtLeast(1280)
-                          var recorder: AudioRecord? = null
-                          val sendSock = DatagramSocket().apply { broadcast = true }
-
-                          while (isActive) {
-                              val active = isPttPressed || isOpenMicOn
-                              if (!active) {
-                                  if (recorder != null) {
-                                      runCatching { recorder?.stop(); recorder?.release() }
-                                      recorder = null
-                                  }
-                                  delay(25)
-                                  continue
-                              }
-                              if (recorder == null) {
-                                  runCatching {
-                                      recorder = AudioRecord(
-                                          MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                                          SAMPLE_RATE,
-                                          AudioFormat.CHANNEL_IN_MONO,
-                                          AudioFormat.ENCODING_PCM_16BIT,
-                                          minBuf * 2
-                                      ).also { rec ->
-                                          if (NoiseSuppressor.isAvailable()) {
-                                              runCatching { NoiseSuppressor.create(rec.audioSessionId)?.enabled = true }
-                                          }
-                                          if (AcousticEchoCanceler.isAvailable()) {
-                                              runCatching { AcousticEchoCanceler.create(rec.audioSessionId)?.enabled = true }
-                                          }
-                                          rec.startRecording()
-                                      }
-                                  }
-                              }
-                              val pcm = ByteArray(FRAME_BYTES)
-                              val read = recorder?.read(pcm, 0, FRAME_BYTES) ?: -1
-                              if (read > 0) {
-                                  val seq = seqCounter.getAndIncrement()
-                                  val pktBytes = ByteArray(14 + read)
-                                  val bb = ByteBuffer.wrap(pktBytes)
-                                  bb.put(MAGIC_AUDIO)
-                                  bb.putLong(selfId)
-                                  bb.putInt(seq)
-                                  bb.put(chainRank.toByte())
-                                  bb.put(pcm, 0, read)
-
-                                  for (b in getBroadcastAddresses()) {
-                                      runCatching {
-                                          sendSock.send(DatagramPacket(pktBytes, pktBytes.size, b, AUDIO_PORT))
-                                      }
-                                  }
-                              }
+                  private fun getAudioTargets(excludeIp: String? = null): List<InetAddress> {
+                      val list = ArrayList<InetAddress>()
+                      val activePeers = peersMap.values.filter { it.handshakeOk && it.ipAddress.isNotEmpty() }
+                      if (activePeers.isNotEmpty()) {
+                          // Direct Unicast to every connected peer (Fast, zero packet loss, bypasses broadcast block!)
+                          for (p in activePeers) {
+                              if (p.ipAddress == excludeIp) continue
+                              if (!selectAllPeers && !allowedPeerIds.contains(p.nodeId) && p.chainRank != 1 && excludeIp == null) continue
+                              runCatching { list.add(InetAddress.getByName(p.ipAddress)) }
                           }
-                          runCatching { recorder?.stop(); recorder?.release(); sendSock.close() }
+                      } else {
+                          // Fallback to cached discovery targets if someone presses PTT before handshake finishes
+                          list.addAll(cachedTargetIps)
                       }
+                      return list
                   }
 
-                  private fun startAudioReceiver() {
+                  private fun startAudioEngine() {
+                      // 1. Open single shared audio socket for both TX & RX + Mesh Relay
+                      try {
+                          audioSocket = DatagramSocket(null).apply {
+                              reuseAddress = true
+                              broadcast = true
+                              bind(InetSocketAddress(AUDIO_PORT))
+                          }
+                      } catch (e: Exception) {
+                          debugLastError.value = "AudioSocket: ${e.message}"
+                          return
+                      }
+
+                      // 2. Receiver + Mesh Relay Coroutine
                       scope.launch {
                           val minOut = AudioTrack.getMinBufferSize(
                               SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
@@ -931,52 +1137,126 @@ jobs:
                               .build()
                           track.play()
 
-                          audioSocket = DatagramSocket(null).apply {
-                              reuseAddress = true
-                              broadcast = true
-                              bind(InetSocketAddress(AUDIO_PORT))
-                          }
                           val buf = ByteArray(2048)
                           var lastClearJob: Job? = null
 
                           while (isActive) {
-                              runCatching {
+                              try {
                                   val pkt = DatagramPacket(buf, buf.size)
-                                  audioSocket?.receive(pkt) ?: return@launch
-                                  if (pkt.length <= 14 || pkt.data[0] != MAGIC_AUDIO) return@runCatching
+                                  val sock = audioSocket ?: break
+                                  sock.receive(pkt)
+                                  if (pkt.length <= HEADER_SIZE || pkt.data[0] != MAGIC_AUDIO) continue
+
                                   val bb = ByteBuffer.wrap(pkt.data, 0, pkt.length)
-                                  bb.get()
+                                  bb.get() // MAGIC
                                   val senderId = bb.long
-                                  if (senderId == selfId) return@runCatching
+                                  if (senderId == selfId) continue
                                   val seq = bb.int
                                   val rank = bb.get().toInt()
+                                  val ttl = bb.get().toInt()
 
-                                  val key = (senderId * 31L) xor seq.toLong()
-                                  if (seenAudio.containsKey(key)) return@runCatching
-                                  seenAudio[key] = true
+                                  val dedupKey = (senderId * 31L) xor seq.toLong()
+                                  if (seenAudio.put(dedupKey, true) != null) continue
+
+                                  // Mesh Relay: If we know >1 riders (e.g. Hotspot owner) and TTL > 0, forward to other peers!
+                                  if (ttl > 0 && peersMap.size > 1) {
+                                      val relayCopy = pkt.data.copyOf(pkt.length)
+                                      relayCopy[14] = (ttl - 1).toByte()
+                                      val fromIp = pkt.address.hostAddress
+                                      for (target in getAudioTargets(excludeIp = fromIp)) {
+                                          runCatching {
+                                              sock.send(DatagramPacket(relayCopy, relayCopy.size, target, AUDIO_PORT))
+                                          }
+                                      }
+                                  }
 
                                   val allowed = selectAllPeers || allowedPeerIds.contains(senderId) || rank == 1
                                   if (allowed) {
-                                      val len = pkt.length - 14
-                                      track.write(pkt.data, 14, len)
+                                      val audioLen = pkt.length - HEADER_SIZE
+                                      track.write(pkt.data, HEADER_SIZE, audioLen)
                                       val name = peersMap[senderId]?.name ?: "راكب #$rank"
                                       activeSpeakerName.value = if (rank == 1) "القائد ($name)" else "$name (راكب $rank)"
                                       lastClearJob?.cancel()
                                       lastClearJob = scope.launch {
-                                          delay(600)
+                                          delay(600L)
                                           activeSpeakerName.value = null
+                                      }
+                                  }
+                              } catch (e: Exception) {
+                                  if (isActive) delay(50)
+                              }
+                          }
+                          runCatching { track.stop(); track.release() }
+                      }
+
+                      // 3. Transmitter Coroutine
+                      scope.launch {
+                          val minBuf = AudioRecord.getMinBufferSize(
+                              SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+                          ).coerceAtLeast(1280)
+                          var recorder: AudioRecord? = null
+
+                          while (isActive) {
+                              val active = isPttPressed || isOpenMicOn
+                              if (!active) {
+                                  if (recorder != null) {
+                                      runCatching { recorder?.stop(); recorder?.release() }
+                                      recorder = null
+                                  }
+                                  delay(25L)
+                                  continue
+                              }
+                              if (recorder == null) {
+                                  runCatching {
+                                      recorder = AudioRecord(
+                                          MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                                          SAMPLE_RATE,
+                                          AudioFormat.CHANNEL_IN_MONO,
+                                          AudioFormat.ENCODING_PCM_16BIT,
+                                          minBuf * 2
+                                      ).also { rec ->
+                                          if (NoiseSuppressor.isAvailable()) {
+                                              runCatching { NoiseSuppressor.create(rec.audioSessionId)?.enabled = true }
+                                          }
+                                          if (AcousticEchoCanceler.isAvailable()) {
+                                              runCatching { AcousticEchoCanceler.create(rec.audioSessionId)?.enabled = true }
+                                          }
+                                          rec.startRecording()
+                                      }
+                                  }.onFailure { debugLastError.value = "Mic: ${it.message}" }
+                              }
+
+                              val pcm = ByteArray(FRAME_BYTES)
+                              val read = recorder?.read(pcm, 0, FRAME_BYTES) ?: -1
+                              if (read > 0) {
+                                  val seq = seqCounter.getAndIncrement()
+                                  val pktBytes = ByteArray(HEADER_SIZE + read)
+                                  val bb = ByteBuffer.wrap(pktBytes)
+                                  bb.put(MAGIC_AUDIO)
+                                  bb.putLong(selfId)
+                                  bb.putInt(seq)
+                                  bb.put(chainRank.toByte())
+                                  bb.put(2.toByte()) // TTL = 2 hops across mesh
+                                  bb.put(pcm, 0, read)
+
+                                  val sock = audioSocket
+                                  if (sock != null) {
+                                      for (target in getAudioTargets()) {
+                                          runCatching {
+                                              sock.send(DatagramPacket(pktBytes, pktBytes.size, target, AUDIO_PORT))
+                                          }
                                       }
                                   }
                               }
                           }
-                          runCatching { track.stop(); track.release() }
+                          runCatching { recorder?.stop(); recorder?.release() }
                       }
                   }
               }
           """)
 
           # =========================================================
-          # 8. MainActivity.kt (Updated with Diagnostics UI)
+          # 8. MainActivity.kt (Live Diagnostics UI + Permissions)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/MainActivity.kt", """
               package com.bikemic.app
@@ -998,8 +1278,10 @@ jobs:
               import androidx.compose.foundation.layout.*
               import androidx.compose.foundation.lazy.LazyColumn
               import androidx.compose.foundation.lazy.items
+              import androidx.compose.foundation.rememberScrollState
               import androidx.compose.foundation.shape.CircleShape
               import androidx.compose.foundation.shape.RoundedCornerShape
+              import androidx.compose.foundation.verticalScroll
               import androidx.compose.material.icons.Icons
               import androidx.compose.material.icons.filled.*
               import androidx.compose.material3.*
@@ -1031,7 +1313,8 @@ jobs:
                           Manifest.permission.ACCESS_WIFI_STATE,
                           Manifest.permission.CHANGE_WIFI_STATE,
                           Manifest.permission.CHANGE_WIFI_MULTICAST_STATE,
-                          Manifest.permission.ACCESS_FINE_LOCATION
+                          Manifest.permission.ACCESS_FINE_LOCATION,
+                          Manifest.permission.ACCESS_COARSE_LOCATION
                       )
                       if (Build.VERSION.SDK_INT >= 33) p.add(Manifest.permission.NEARBY_WIFI_DEVICES)
                       return p.toTypedArray()
@@ -1040,9 +1323,10 @@ jobs:
                   private val permLauncher = registerForActivityResult(
                       ActivityResultContracts.RequestMultiplePermissions()
                   ) { result ->
-                      val audio = result[Manifest.permission.RECORD_AUDIO] == true
+                      val audio = result[Manifest.permission.RECORD_AUDIO] == true ||
+                          ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
                       if (!audio) {
-                          Toast.makeText(this, "صلاحية المايك إلزامية. سيتم الإغلاق.", Toast.LENGTH_LONG).show()
+                          Toast.makeText(this, "صلاحية المايك إلزامية للتشغيل.", Toast.LENGTH_LONG).show()
                           finishAffinity()
                       } else {
                           permissionsGranted.value = true
@@ -1054,7 +1338,10 @@ jobs:
                       super.onCreate(savedInstanceState)
                       val prefs = getSharedPreferences("bikemic_p2p", Context.MODE_PRIVATE)
 
-                      if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                      val missing = requiredPermissions().any {
+                          ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+                      }
+                      if (!missing) {
                           permissionsGranted.value = true
                           startAll()
                       } else {
@@ -1073,7 +1360,7 @@ jobs:
                                                       Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
                                                       engine?.leaderChangeEvent?.value = null
                                                   }
-                                                  delay(500)
+                                                  delay(500L)
                                               }
                                           }
                                           BikeMicScreen(
@@ -1116,8 +1403,10 @@ jobs:
 
                   override fun onDestroy() {
                       super.onDestroy()
-                      engine?.stop()
-                      health?.stop()
+                      if (isFinishing) {
+                          engine?.stop()
+                          health?.stop()
+                      }
                   }
               }
 
@@ -1148,10 +1437,12 @@ jobs:
                   val epoch by engine.currentEpochState
                   val sent by engine.debugSentCount
                   val received by engine.debugReceivedCount
+                  val lastErr by engine.debugLastError
 
                   LaunchedEffect(ver) {
                       val list = engine.peersMap.values.sortedBy { it.chainRank }
-                      peers.clear(); peers.addAll(list)
+                      peers.clear()
+                      peers.addAll(list)
                   }
 
                   val isHost = hostId == engine.selfId
@@ -1338,7 +1629,7 @@ jobs:
                                       Spacer(Modifier.height(8.dp))
                                       if (peers.isEmpty()) {
                                           Text(
-                                              "لا يوجد أحد بعد. تأكد من اتصال جميع الهواتف بنفس الواي فاي/الهوتسبوت.",
+                                              "لا يوجد دراجون بعد. افتح نقطة اتصال (Hotspot) في هاتف واحد واتصل بها من بقية الهواتف.",
                                               color = Color.Gray, fontSize = 13.sp
                                           )
                                       } else {
@@ -1359,8 +1650,8 @@ jobs:
                                                               fontWeight = FontWeight.Bold, fontSize = 14.sp
                                                           )
                                                           Text(
-                                                              "${if (p.handshakeOk) "متصل فعلياً" else "بانتظار التأكيد"} • بطارية ${p.batteryPct}% • ${thermalLabel(p.thermalStatus)}",
-                                                              color = if (p.handshakeOk) Color(0xFF32D74B) else Color(0xFFFF9F0A),
+                                                              "IP: ${p.ipAddress} • بطارية ${p.batteryPct}% • ${thermalLabel(p.thermalStatus)}",
+                                                              color = Color(0xFF32D74B),
                                                               fontSize = 11.sp
                                                           )
                                                       }
@@ -1407,50 +1698,47 @@ jobs:
                           )
                       }
 
-                      // شاشة التشخيص الجديدة
                       if (showInfo) {
+                          val ifaces = remember(sent, ver) { engine.getDebugInterfaces() }
+                          val bcasts = remember(sent, ver) { engine.getDebugBroadcasts() }
                           AlertDialog(
                               onDismissRequest = { showInfo = false },
                               containerColor = Color(0xFF1C1C1E),
-                              title = { Text("تشخيص الشبكة", color = Color.White, fontWeight = FontWeight.Bold) },
+                              title = { Text("تشخيص الشبكة الحي", color = Color.White, fontWeight = FontWeight.Bold) },
                               text = {
-                                  Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                  Column(
+                                      modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+                                      verticalArrangement = Arrangement.spacedBy(5.dp)
+                                  ) {
                                       Text("معرفك: ${engine.selfId}", color = Color.Gray, fontSize = 11.sp)
-                                      Text("القائد: ${if (isHost) "أنت" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")}", color = Color.White)
-                                      Text("Epoch: $epoch", color = Color.Gray, fontSize = 12.sp)
+                                      Text("القائد: ${if (isHost) "أنت" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")} (Epoch $epoch)", color = Color.White, fontSize = 12.sp)
                                       HorizontalDivider(color = Color.DarkGray)
-                                      Text("واجهات شبكتك:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                      val ifaces = remember { engine.getDebugInterfaces() }
+                                      Text("واجهات الشبكة النشطة:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                       if (ifaces.isEmpty()) {
-                                          Text("لا توجد واجهات نشطة!", color = Color.Red, fontSize = 12.sp)
+                                          Text("لا توجد واجهة واي فاي/هوتسبوت نشطة!", color = Color.Red, fontSize = 12.sp)
                                       } else {
-                                          ifaces.forEach { (name, ip) ->
-                                              Text("• $name: $ip", color = Color.White, fontSize = 12.sp)
+                                          ifaces.forEach { (ifName, ip) ->
+                                              Text("• $ifName: $ip", color = Color.White, fontSize = 12.sp)
                                           }
                                       }
                                       HorizontalDivider(color = Color.DarkGray)
-                                      Text("عناوين البث المستخدمة:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                      val bcasts = remember { engine.getDebugBroadcasts() }
+                                      Text("الأهداف النشطة (Unicast / Gateway / Broadcast):", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                       bcasts.forEach { b ->
-                                          Text("• $b", color = Color.White, fontSize = 12.sp)
+                                          Text("• $b", color = Color.LightGray, fontSize = 11.sp)
                                       }
                                       HorizontalDivider(color = Color.DarkGray)
-                                      Text("إحصائيات:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                      Text("إحصائيات حقيقية (بدون صدى جهازك):", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                       Text("• حزم أُرسلت: $sent", color = Color.White, fontSize = 12.sp)
-                                      Text("• حزم مستلمة: $received", color = Color.White, fontSize = 12.sp)
-                                      Text("• أقران مكتشفون: ${peers.size}", color = Color.White, fontSize = 12.sp)
-                                      Spacer(Modifier.height(8.dp))
-                                      Text(
-                                          "إذا كانت 'حزم أُرسلت' تتزايد لكن 'حزم مستلمة' صفر، فالمشكلة في الشبكة (عزل الأجهزة/جدار ناري). جرّب تعطيل 'عزل نقاط الاتصال' في إعدادات الهوتسبوت، أو استخدم راوتر عادي.",
-                                          color = Color(0xFFFF9F0A), fontSize = 11.sp
-                                      )
+                                      Text("• حزم مستلمة من أقران آخرين: $received", color = Color.White, fontSize = 12.sp)
+                                      Text("• دراجون متصلون الآن: ${peers.size}", color = Color.White, fontSize = 12.sp)
+                                      Text("• آخر حالة نظام: $lastErr", color = Color(0xFFFF9F0A), fontSize = 11.sp)
                                   }
                               },
                               confirmButton = {
                                   Button(
                                       onClick = { showInfo = false },
                                       colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF32D74B))
-                                  ) { Text("فهمت", color = Color.Black) }
+                                  ) { Text("إغلاق", color = Color.Black) }
                               }
                           )
                       }
@@ -1466,7 +1754,7 @@ jobs:
               }
           """)
 
-          print("BikeMic P2P Mesh project with diagnostics generated successfully.")
+          print("BikeMic P2P Mesh project (Fixed & Optimized) generated successfully.")
           PYEOF
           python3 /tmp/gen_bikemic_p2p.py
 
@@ -1482,6 +1770,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BikeMic-P2P-Mesh-Diagnostics-APK
+          name: BikeMic-P2P-Mesh-Fixed-APK
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 30
