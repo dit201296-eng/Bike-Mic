@@ -1,4 +1,4 @@
-name: Build BikeMic P2P Mesh APK (Auto-Connect + HD Audio + LockScreen + ACK)
+name: Build BikeMic P2P Mesh APK (Smart Anti-Collision + 30% Power Election)
 
 on:
   push:
@@ -57,7 +57,7 @@ jobs:
           test -s app/release.keystore
           echo "Temporary keystore generated."
 
-      - name: Generate P2P Mesh project with Zero-Touch Auto-Hotspot, 3% Handover, LockScreen & ACK
+      - name: Generate P2P Mesh project with Anti-Collision Auto-Hotspot & 30% Power Election
         env:
           RUN_NUM: ${{ github.run_number }}
         run: |
@@ -173,7 +173,7 @@ jobs:
                   implementation 'androidx.compose.material:material-icons-extended'
                   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
               }
-          """.replace("VERSION_CODE", str(1000 + run_num)).replace("VERSION_NAME", f"7.{run_num}"))
+          """.replace("VERSION_CODE", str(1100 + run_num)).replace("VERSION_NAME", f"8.{run_num}"))
 
           write("app/proguard-rules.pro", r"""
               -keep class com.bikemic.app.** { *; }
@@ -253,7 +253,7 @@ jobs:
           """)
 
           # =========================================================
-          # 3. AndroidManifest (Auto P2P Hotspot + LockScreen + Audio)
+          # 3. AndroidManifest
           # =========================================================
           write("app/src/main/AndroidManifest.xml", r"""
               <?xml version="1.0" encoding="utf-8"?>
@@ -303,7 +303,7 @@ jobs:
           """)
 
           # =========================================================
-          # 4. Models.kt
+          # 4. Models.kt (Includes hardwareSpecScore & totalPowerScore)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/Models.kt", r"""
               package com.bikemic.app
@@ -315,6 +315,7 @@ jobs:
                   val batteryPct: Int,
                   val isCharging: Boolean,
                   val thermalStatus: Int,
+                  val hardwareSpecScore: Int,
                   val epoch: Long,
                   val currentHostId: Long,
                   val ipAddress: String,
@@ -325,11 +326,12 @@ jobs:
           """)
 
           # =========================================================
-          # 5. DeviceHealthMonitor.kt
+          # 5. DeviceHealthMonitor.kt (Measures Battery, Thermal & Hardware Specs: RAM + CPU Cores)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/DeviceHealthMonitor.kt", r"""
               package com.bikemic.app
 
+              import android.app.ActivityManager
               import android.content.BroadcastReceiver
               import android.content.Context
               import android.content.Intent
@@ -348,6 +350,19 @@ jobs:
                       const val THERMAL_MODERATE = 2
                       const val THERMAL_SEVERE = 3
                       const val THERMAL_CRITICAL = 4
+
+                      fun computeHardwareSpecScore(context: Context): Int {
+                          return runCatching {
+                              val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                              val memInfo = ActivityManager.MemoryInfo()
+                              am.getMemoryInfo(memInfo)
+                              val ramGb = (memInfo.totalMem / (1024L * 1024L * 1024L)).toInt().coerceIn(1, 24)
+                              val cores = Runtime.getRuntime().availableProcessors().coerceIn(2, 16)
+                              val sdkBonus = (Build.VERSION.SDK_INT - 26).coerceIn(0, 10)
+                              // Hardware spec points (typically 15..55 points)
+                              (ramGb * 2) + cores + sdkBonus
+                          }.getOrDefault(20)
+                      }
                   }
 
                   @Volatile var batteryPct: Int = 100
@@ -356,6 +371,8 @@ jobs:
                       private set
                   @Volatile var thermalStatus: Int = THERMAL_NONE
                       private set
+
+                  val hardwareSpecScore: Int = computeHardwareSpecScore(context)
 
                   private var batteryReceiver: BroadcastReceiver? = null
                   private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
@@ -408,16 +425,23 @@ jobs:
 
           # =========================================================
           # 6. LeaderElection.kt
-          #    - Battery threshold set to 3% (if <= 3% and not charging, immediately step down!)
-          #    - At <= 3% battery, step-down is immediate (no 25s wait so phone doesn't die first!)
+          #    - Battery threshold = 30%:
+          #      1. If Leader battery < 30% (and not charging), check if ANY connected peer has battery >= 30%
+          #         and acceptable thermal status (< SEVERE).
+          #      2. If YES -> hand over leadership to the strongest peer!
+          #      3. If NO (ALL phones are < 30% battery) -> STAY on current leader without switching!
+          #    - Thermal awareness:
+          #      If Leader thermal >= SEVERE, hand over to a cooler peer (if a cooler peer exists).
+          #    - Priority by Device Power/Strength (Battery + Charging + Cool Thermal + Hardware RAM/CPU Score),
+          #      NOT static rank!
           # =========================================================
           write("app/src/main/java/com/bikemic/app/LeaderElection.kt", r"""
               package com.bikemic.app
 
               class LeaderElection(
                   private val selfId: Long,
-                  private val minBattery: Int = 3,
-                  private val thermalHoldMs: Long = 25_000L
+                  private val minHealthyBattery: Int = 30,
+                  private val thermalHoldMs: Long = 10_000L
               ) {
                   @Volatile var currentHostId: Long = selfId
                       private set
@@ -425,35 +449,102 @@ jobs:
                       private set
 
                   private var thermalHighSinceMs: Long = 0L
+                  private var lowBatSinceMs: Long = 0L
 
-                  fun healthScore(bat: Int, chg: Boolean, thermal: Int): Double {
-                      if (bat <= minBattery && !chg) return -900.0
-                      var s = bat.toDouble()
-                      when (thermal) {
-                          DeviceHealthMonitor.THERMAL_CRITICAL -> return -1000.0
-                          DeviceHealthMonitor.THERMAL_SEVERE -> s -= 60.0
-                          DeviceHealthMonitor.THERMAL_MODERATE -> s -= 30.0
-                          DeviceHealthMonitor.THERMAL_LIGHT -> s -= 8.0
+                  /**
+                   * Calculates overall Device Power & Readiness Score:
+                   * - Battery %: 0..100 (x1.5 weight = 0..150 pts)
+                   * - Charging bonus: +35 pts
+                   * - Hardware Spec Score (RAM + CPU cores): +15..55 pts
+                   * - Thermal penalty: LIGHT (-15), MODERATE (-45), SEVERE (-120), CRITICAL (-1000)
+                   * - Above 30% Battery Tier Bonus: +200 pts so any device >= 30% always beats < 30%
+                   */
+                  fun devicePowerScore(bat: Int, chg: Boolean, thermal: Int, hwScore: Int): Double {
+                      if (thermal >= DeviceHealthMonitor.THERMAL_CRITICAL) return -1000.0
+                      var score = (bat * 1.5) + hwScore.toDouble()
+                      if (bat >= minHealthyBattery || chg) {
+                          score += 200.0
                       }
-                      if (chg) s += 20.0
-                      return s
+                      if (chg) {
+                          score += 35.0
+                      }
+                      when (thermal) {
+                          DeviceHealthMonitor.THERMAL_SEVERE -> score -= 120.0
+                          DeviceHealthMonitor.THERMAL_MODERATE -> score -= 45.0
+                          DeviceHealthMonitor.THERMAL_LIGHT -> score -= 15.0
+                      }
+                      return score
                   }
 
-                  fun shouldStepDown(bat: Int, chg: Boolean, thermal: Int, nowMs: Long): Boolean {
-                      if (currentHostId != selfId) return false
-                      // Immediate handover when battery drops to 3% or below (no delay so device doesn't shut off before handover)
-                      if (bat <= minBattery && !chg) {
-                          return true
-                      }
-                      if (thermal >= DeviceHealthMonitor.THERMAL_SEVERE) {
+                  fun peerPowerScore(p: PeerInfo): Double =
+                      devicePowerScore(p.batteryPct, p.isCharging, p.thermalStatus, p.hardwareSpecScore)
+
+                  /**
+                   * Checks whether current leader should hand over leadership to another peer.
+                   * Returns the best replacement PeerInfo ONLY IF a genuinely better candidate exists!
+                   * - If battery < 30% (and not charging): only step down if at least one peer has battery >= 30% (or is charging)
+                   *   and thermal < SEVERE. If ALL peers are < 30%, returns null (stays as leader!).
+                   * - If thermal >= SEVERE: only step down if at least one peer has thermal < SEVERE.
+                   */
+                  fun findReplacementIfShouldStepDown(
+                      selfPeer: PeerInfo,
+                      peers: Collection<PeerInfo>,
+                      nowMs: Long
+                  ): Pair<PeerInfo, String>? {
+                      if (currentHostId != selfId) return null
+                      val activePeers = peers.filter { it.handshakeOk }
+                      if (activePeers.isEmpty()) return null
+
+                      // 1. Check Thermal Handover
+                      if (selfPeer.thermalStatus >= DeviceHealthMonitor.THERMAL_SEVERE) {
                           if (thermalHighSinceMs == 0L) thermalHighSinceMs = nowMs
-                          if (nowMs - thermalHighSinceMs >= thermalHoldMs) return true
+                          if (nowMs - thermalHighSinceMs >= thermalHoldMs) {
+                              val coolerPeers = activePeers.filter { it.thermalStatus < selfPeer.thermalStatus }
+                              val bestCooler = coolerPeers.maxWithOrNull(
+                                  compareBy<PeerInfo> { peerPowerScore(it) }.thenBy { -it.nodeId }
+                              )
+                              if (bestCooler != null) {
+                                  thermalHighSinceMs = 0L
+                                  return bestCooler to "حرارة الهاتف مرتفعة"
+                              }
+                          }
                       } else {
                           thermalHighSinceMs = 0L
                       }
-                      return false
+
+                      // 2. Check 30% Battery Rule:
+                      // If our battery drops below 30% (and not charging), hand over ONLY IF another peer has >= 30% (or is charging).
+                      // If everyone is < 30%, stay as leader!
+                      val isSelfBelow30 = selfPeer.batteryPct < minHealthyBattery && !selfPeer.isCharging
+                      if (isSelfBelow30) {
+                          if (lowBatSinceMs == 0L) lowBatSinceMs = nowMs
+                          if (nowMs - lowBatSinceMs >= 4_000L) {
+                              val healthyPeersAbove30 = activePeers.filter {
+                                  (it.batteryPct >= minHealthyBattery || it.isCharging) &&
+                                      it.thermalStatus < DeviceHealthMonitor.THERMAL_SEVERE
+                              }
+                              val bestHealthy = healthyPeersAbove30.maxWithOrNull(
+                                  compareBy<PeerInfo> { peerPowerScore(it) }.thenBy { -it.nodeId }
+                              )
+                              if (bestHealthy != null) {
+                                  lowBatSinceMs = 0L
+                                  return bestHealthy to "البطارية أقل من 30%"
+                              }
+                              // Otherwise: all peers are also < 30%! Keep current leader!
+                          }
+                      } else {
+                          lowBatSinceMs = 0L
+                      }
+
+                      return null
                   }
 
+                  /**
+                   * Picks the strongest phone across all connected riders (used on initial mesh formation
+                   * or when the previous Leader phone turns off / disconnects).
+                   * Priority is strictly by Device Power Score (Battery >= 30%, Thermal, RAM/CPU, Battery %),
+                   * with nodeId as deterministic tie-breaker.
+                   */
                   fun pickBestLeader(selfPeer: PeerInfo, peers: Collection<PeerInfo>, excludeId: Long = -1L): PeerInfo? {
                       val all = ArrayList<PeerInfo>(peers.size + 1)
                       all.add(selfPeer)
@@ -461,11 +552,10 @@ jobs:
                       return all
                           .asSequence()
                           .filter { it.nodeId != excludeId }
-                          .filter { it.batteryPct > minBattery || it.isCharging }
                           .filter { it.thermalStatus < DeviceHealthMonitor.THERMAL_CRITICAL }
                           .sortedWith(
-                              compareBy<PeerInfo> { it.chainRank }
-                                  .thenByDescending { healthScore(it.batteryPct, it.isCharging, it.thermalStatus) }
+                              compareByDescending<PeerInfo> { peerPowerScore(it) }
+                                  .thenBy { it.chainRank }
                                   .thenBy { it.nodeId }
                           )
                           .firstOrNull()
@@ -481,6 +571,11 @@ jobs:
                       return false
                   }
 
+                  fun forceSetHost(hostId: Long, epoch: Long) {
+                      currentHostId = hostId
+                      currentEpoch = maxOf(currentEpoch, epoch)
+                  }
+
                   fun declareSelfAsHost(minEpoch: Long = currentEpoch): Pair<Long, Long> {
                       currentHostId = selfId
                       currentEpoch = maxOf(currentEpoch, minEpoch) + 1L
@@ -491,14 +586,19 @@ jobs:
 
           # =========================================================
           # 7. AutoMeshHotspotManager.kt
-          #    - Zero-Touch Automatic Hotspot & Client Connection using Wi-Fi Direct Autonomous Group (P2P GO)
-          #    - No manual phone Hotspot toggle needed!
-          #    - Leader (Rank 1 or elected Host) automatically creates a Wi-Fi Direct Hotspot Group (192.168.49.1)
-          #      and broadcasts SSID + Passphrase via DNS-SD Service Record (Zero-Popups!).
-          #    - Other riders automatically discover the DNS-SD record and connect seamlessly via
-          #      WifiNetworkSpecifier / WifiConfiguration / WifiP2pManager.
-          #    - If Leader battery drops <= 3%, Leader automatically closes its group and the next Rider
-          #      automatically starts the group!
+          #    - Fixes the dual-network collision completely!
+          #    - First checks if phone is ALREADY on a manual Mobile Hotspot or Wi-Fi LAN with peers:
+          #      if manual Hotspot is active on this phone, NEVER call WifiP2pManager (which would trigger
+          #      Android's "هل تريد إيقاف تشغيل نقطة اتصال الهواتف المحمولة؟" popup!).
+          #    - When no Hotspot exists, uses Smart Anti-Collision P2P Arbitration:
+          #      1. Every phone advertises its presence & DevicePowerScore via Wi-Fi Direct DNS-SD (`_bikemic._udp`)
+          #         and listens first (`Listen-Before-Create`).
+          #      2. Phones compare their `(DevicePowerScore, nodeId)` during discovery.
+          #      3. ONLY the single strongest phone creates the Wi-Fi Direct Hotspot Group (`DIRECT-BM-BIKEMIC`),
+          #         while the other phone(s) wait and automatically join it!
+          #      4. If a rare race happens where two phones both created a group before seeing each other,
+          #         the weaker phone detects the stronger phone's DNS-SD broadcast, automatically tears down
+          #         its duplicate group (`removeGroup`), and connects to the stronger phone!
           # =========================================================
           write("app/src/main/java/com/bikemic/app/AutoMeshHotspotManager.kt", r"""
               package com.bikemic.app
@@ -525,13 +625,30 @@ jobs:
               import android.os.Build
               import android.os.Looper
               import kotlinx.coroutines.*
+              import java.net.Inet4Address
+              import java.net.NetworkInterface
+              import java.util.concurrent.ConcurrentHashMap
 
               @SuppressLint("MissingPermission")
               class AutoMeshHotspotManager(
                   private val context: Context,
+                  private val selfId: Long,
+                  private val getSelfPowerScore: () -> Int,
+                  private val getActiveUdpPeerCount: () -> Int,
                   private val onStatusChange: (String) -> Unit,
-                  private val onTopologyChanged: (goIp: String?) -> Unit
+                  private val onTopologyChanged: (goIp: String?) -> Unit,
+                  private val onElectLeaderFromP2p: (leaderNodeId: Long) -> Unit
               ) {
+                  data class DiscoveredP2pCandidate(
+                      val nodeId: Long,
+                      val powerScore: Int,
+                      val isHostingGroup: Boolean,
+                      val ssid: String,
+                      val pass: String,
+                      val device: WifiP2pDevice?,
+                      val seenAtMs: Long
+                  )
+
                   private val p2pManager: WifiP2pManager? =
                       context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
                   private var channel: WifiP2pManager.Channel? = null
@@ -549,13 +666,60 @@ jobs:
                   @Volatile var groupOwnerIp: String? = null
                       private set
 
-                  @Volatile private var shouldHostGroup: Boolean = false
+                  @Volatile private var forcedHostByElection: Boolean = false
+                  @Volatile private var steppedDownUntilMs: Long = 0L
                   @Volatile private var lastConnectAttemptMs: Long = 0L
+                  @Volatile private var startTimeMs: Long = 0L
                   @Volatile private var activeNetCallback: ConnectivityManager.NetworkCallback? = null
                   private var localServiceInfo: WifiP2pDnsSdServiceInfo? = null
 
-                  fun start(initialShouldHost: Boolean) {
-                      shouldHostGroup = initialShouldHost
+                  private val nearbyCandidates = ConcurrentHashMap<Long, DiscoveredP2pCandidate>()
+
+                  /**
+                   * Checks if the user already has a standard Android Mobile Hotspot (SoftAP / tethering) turned on.
+                   * If so, we MUST NOT call WifiP2pManager.createGroup or discoverServices because Android shows a
+                   * blocking system dialog: "هل تريد إيقاف تشغيل نقطة اتصال الهواتف المحمولة؟".
+                   */
+                  private fun isSystemMobileHotspotActive(): Boolean {
+                      runCatching {
+                          val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                          val m = wifi.javaClass.getDeclaredMethod("isWifiApEnabled")
+                          m.isAccessible = true
+                          if (m.invoke(wifi) as? Boolean == true) return true
+                      }
+                      runCatching {
+                          val ifaces = NetworkInterface.getNetworkInterfaces()
+                          while (ifaces != null && ifaces.hasMoreElements()) {
+                              val nif = ifaces.nextElement()
+                              if (!nif.isUp || nif.isLoopback) continue
+                              val n = nif.name.lowercase()
+                              // swlan / ap / wlan1 / rndis with 192.168.43.x or 192.168.x.x where p2p is not in the name
+                              if (n.startsWith("ap") || n.startsWith("swlan") || n.startsWith("softap") || n == "wlan1") {
+                                  for (ia in nif.interfaceAddresses) {
+                                      if (ia.address is Inet4Address && !ia.address.isLoopbackAddress) return true
+                                  }
+                              }
+                          }
+                      }
+                      return false
+                  }
+
+                  private fun isStrongerThanSelf(otherPower: Int, otherId: Long): Boolean {
+                      val myPower = getSelfPowerScore()
+                      return if (otherPower != myPower) {
+                          otherPower > myPower
+                      } else {
+                          otherId < selfId
+                      }
+                  }
+
+                  fun start() {
+                      startTimeMs = System.currentTimeMillis()
+                      if (isSystemMobileHotspotActive()) {
+                          onStatusChange("نقطة اتصال الهاتف نشطة • الربط المباشر جاهز")
+                          return
+                      }
+
                       runCatching {
                           val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                           @Suppress("DEPRECATION")
@@ -564,69 +728,96 @@ jobs:
                           }
                       }
 
-                      val mgr = p2pManager ?: run {
-                          onStatusChange("جهازك لا يدعم Wi-Fi Direct التلقائي")
-                          return
-                      }
+                      val mgr = p2pManager ?: return
                       channel = mgr.initialize(context, Looper.getMainLooper(), null)
 
                       registerP2pReceiver()
                       setupDnsSdDiscoveryListener()
 
                       scope.launch {
-                          delay(600L)
-                          applyRoleNow()
+                          // Clean up any leftover stale group from a previous session so two phones don't start in conflict
+                          clearStaleGroupOnStartup()
+                          delay(700L)
+
+                          // Phase 1: Advertise our presence & power score + listen for 2.5 seconds before anyone creates a group
+                          advertisePresenceAndGroup()
+                          startServiceDiscoverySweep()
+
+                          // Deterministic stagger: stronger phones have shorter wait (2.2s..3.2s), weaker phones wait longer (3.8s..5.5s)
+                          val myScore = getSelfPowerScore().coerceIn(0, 400)
+                          val waitMs = (4800L - (myScore * 6L) + (selfId % 700L)).coerceIn(2200L, 5200L)
+                          delay(waitMs)
+
                           while (isActive) {
-                              runCatching { maintainAutoConnection() }
-                              delay(5000L)
+                              runCatching { arbitrateAndMaintainNetwork() }
+                              delay(3500L)
                           }
                       }
                   }
 
-                  fun setRole(shouldBeHost: Boolean) {
-                      if (shouldHostGroup == shouldBeHost) return
-                      shouldHostGroup = shouldBeHost
+                  private fun clearStaleGroupOnStartup() {
+                      val mgr = p2pManager ?: return
+                      val ch = channel ?: return
+                      mgr.requestGroupInfo(ch) { grp ->
+                          if (grp != null && grp.isGroupOwner && grp.clientList.isEmpty()) {
+                              mgr.removeGroup(ch, null)
+                              isGroupOwnerNow = false
+                              isConnectedNow = false
+                          }
+                      }
+                  }
+
+                  fun promoteToHostNow() {
+                      forcedHostByElection = true
+                      steppedDownUntilMs = 0L
                       scope.launch {
-                          applyRoleNow()
+                          if (!isSystemMobileHotspotActive()) {
+                              startAutonomousHostGroup()
+                          }
                       }
                   }
 
                   fun stepDownHostGroupNow() {
-                      shouldHostGroup = false
+                      forcedHostByElection = false
+                      steppedDownUntilMs = System.currentTimeMillis() + 30_000L
                       val mgr = p2pManager ?: return
                       val ch = channel ?: return
                       runCatching {
-                          localServiceInfo?.let { mgr.removeLocalService(ch, it, null) }
-                          localServiceInfo = null
                           mgr.removeGroup(ch, object : WifiP2pManager.ActionListener {
                               override fun onSuccess() {
                                   isGroupOwnerNow = false
                                   isConnectedNow = false
                                   groupSsid = ""
                                   groupPass = ""
-                                  onStatusChange("تم نقل قيادة الشبكة تلقائياً وبحث عن القائد الجديد...")
-                                  startClientDiscovery()
+                                  advertisePresenceAndGroup()
+                                  onStatusChange("تم تسليم الشبكة للقائد الأقوى • جاري الربط به...")
+                                  startServiceDiscoverySweep()
                               }
                               override fun onFailure(reason: Int) {
-                                  startClientDiscovery()
+                                  startServiceDiscoverySweep()
                               }
                           })
                       }
                   }
 
-                  private fun applyRoleNow() {
-                      if (shouldHostGroup) {
-                          startAutonomousHostGroup()
-                      } else {
-                          if (isGroupOwnerNow) {
-                              stepDownHostGroupNow()
-                          } else {
-                              startClientDiscovery()
-                          }
+                  private fun arbitrateAndMaintainNetwork() {
+                      // 1. If manual mobile hotspot is active or we already have live UDP peers over Wi-Fi/Hotspot, don't disrupt!
+                      if (isSystemMobileHotspotActive()) {
+                          onStatusChange("متصل عبر نقطة اتصال الهاتف")
+                          return
                       }
-                  }
+                      if (getActiveUdpPeerCount() > 0) {
+                          // Already talking to peers over UDP! Keep advertising if we are GO, otherwise do nothing disruptive.
+                          if (isGroupOwnerNow && groupSsid.isNotEmpty()) {
+                              advertisePresenceAndGroup()
+                          }
+                          return
+                      }
 
-                  private fun maintainAutoConnection() {
+                      val now = System.currentTimeMillis()
+                      // Prune old candidates (> 12s)
+                      nearbyCandidates.entries.removeIf { now - it.value.seenAtMs > 12_000L }
+
                       val mgr = p2pManager ?: return
                       val ch = channel ?: return
 
@@ -636,45 +827,102 @@ jobs:
                               isGroupOwnerNow = group.isGroupOwner
                               groupSsid = group.networkName ?: ""
                               groupPass = group.passphrase ?: ""
+
                               if (group.isGroupOwner) {
                                   groupOwnerIp = "192.168.49.1"
-                                  advertiseGroupCredentials(groupSsid, groupPass)
+                                  // Anti-Collision check: If we are hosting an EMPTY group (0 clients connected)
+                                  // AND we see another phone already hosting a group (or a stronger phone),
+                                  // yield immediately so both phones don't stay in separate groups!
+                                  val strongerOrActiveHost = nearbyCandidates.values.firstOrNull { cand ->
+                                      cand.isHostingGroup && isStrongerThanSelf(cand.powerScore, cand.nodeId)
+                                  }
+                                  if (group.clientList.isEmpty() && strongerOrActiveHost != null && !forcedHostByElection) {
+                                      onStatusChange("تم اكتشاف قائد أقوى • إغلاق الشبكة المكررة والربط به...")
+                                      mgr.removeGroup(ch, object : WifiP2pManager.ActionListener {
+                                          override fun onSuccess() {
+                                              isGroupOwnerNow = false
+                                              isConnectedNow = false
+                                              groupSsid = ""
+                                              groupPass = ""
+                                              connectToDiscoveredLeader(
+                                                  strongerOrActiveHost.device,
+                                                  strongerOrActiveHost.ssid,
+                                                  strongerOrActiveHost.pass
+                                              )
+                                          }
+                                          override fun onFailure(r: Int) {}
+                                      })
+                                      return@requestGroupInfo
+                                  }
+
+                                  advertisePresenceAndGroup()
                                   onStatusChange("شبكة القائد التلقائية جاهزة ($groupSsid)")
                                   onTopologyChanged("192.168.49.1")
                               } else {
                                   onStatusChange("متصل تلقائياً بشبكة القائد ($groupSsid)")
                                   onTopologyChanged(groupOwnerIp ?: "192.168.49.1")
                               }
+                              return@requestGroupInfo
+                          }
+
+                          // No group is currently formed on this phone:
+                          isConnectedNow = false
+                          isGroupOwnerNow = false
+                          groupSsid = ""
+                          groupPass = ""
+
+                          // Check if any nearby phone is ALREADY hosting a group:
+                          val existingHost = nearbyCandidates.values
+                              .filter { it.isHostingGroup && it.ssid.isNotEmpty() }
+                              .maxWithOrNull(compareBy<DiscoveredP2pCandidate> { it.powerScore }.thenBy { -it.nodeId })
+
+                          if (existingHost != null) {
+                              onStatusChange("تم العثور على شبكة القائد (${existingHost.ssid}) • جاري الانضمام...")
+                              onElectLeaderFromP2p(existingHost.nodeId)
+                              connectToDiscoveredLeader(existingHost.device, existingHost.ssid, existingHost.pass)
+                              return@requestGroupInfo
+                          }
+
+                          // Check if any nearby phone has a HIGHER power score than us:
+                          val strongerPeer = nearbyCandidates.values.firstOrNull {
+                              isStrongerThanSelf(it.powerScore, it.nodeId)
+                          }
+
+                          val inStepDownCooldown = now < steppedDownUntilMs
+                          if (forcedHostByElection || (!inStepDownCooldown && strongerPeer == null)) {
+                              // We are the strongest phone (or sole phone after listen window) -> Create the single group!
+                              onElectLeaderFromP2p(selfId)
+                              startAutonomousHostGroup()
                           } else {
-                              isConnectedNow = false
-                              isGroupOwnerNow = false
-                              if (shouldHostGroup) {
-                                  startAutonomousHostGroup()
-                              } else {
-                                  startClientDiscovery()
-                              }
+                              // Wait for the stronger phone to open its group and keep scanning
+                              onStatusChange("بانتظار شبكة الهاتف الأقوى للاتصال التلقائي...")
+                              advertisePresenceAndGroup()
+                              startServiceDiscoverySweep()
                           }
                       }
                   }
 
                   private fun startAutonomousHostGroup() {
+                      if (isSystemMobileHotspotActive()) return
                       val mgr = p2pManager ?: return
                       val ch = channel ?: return
 
                       mgr.requestGroupInfo(ch) { existing ->
-                          if (existing != null && existing.isGroupOwner) {
-                              isGroupOwnerNow = true
+                          if (existing != null) {
+                              isGroupOwnerNow = existing.isGroupOwner
                               isConnectedNow = true
                               groupSsid = existing.networkName ?: ""
                               groupPass = existing.passphrase ?: ""
-                              groupOwnerIp = "192.168.49.1"
-                              advertiseGroupCredentials(groupSsid, groupPass)
-                              onStatusChange("شبكة القائد التلقائية نشطة ($groupSsid)")
-                              onTopologyChanged("192.168.49.1")
+                              if (existing.isGroupOwner) {
+                                  groupOwnerIp = "192.168.49.1"
+                                  advertisePresenceAndGroup()
+                                  onStatusChange("شبكة القائد التلقائية نشطة ($groupSsid)")
+                                  onTopologyChanged("192.168.49.1")
+                              }
                               return@requestGroupInfo
                           }
 
-                          onStatusChange("جاري إنشاء نقطة اتصال تلقائية للقائد...")
+                          onStatusChange("هذا الهاتف هو الأقوى • جاري تفعيل نقطة الاتصال التلقائية...")
                           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                               val cfg = WifiP2pConfig.Builder()
                                   .setNetworkName("DIRECT-BM-BIKEMIC")
@@ -704,7 +952,6 @@ jobs:
                               queryAndAdvertiseGroup()
                           }
                           override fun onFailure(reason: Int) {
-                              // Already in a group or busy; inspect group info
                               queryAndAdvertiseGroup()
                           }
                       })
@@ -714,7 +961,7 @@ jobs:
                       val mgr = p2pManager ?: return
                       val ch = channel ?: return
                       scope.launch {
-                          delay(500L)
+                          delay(450L)
                           mgr.requestGroupInfo(ch) { group ->
                               if (group != null) {
                                   isGroupOwnerNow = group.isGroupOwner
@@ -722,30 +969,31 @@ jobs:
                                   groupSsid = group.networkName ?: "DIRECT-BM-BIKEMIC"
                                   groupPass = group.passphrase ?: "bikemic1234"
                                   groupOwnerIp = "192.168.49.1"
-                                  advertiseGroupCredentials(groupSsid, groupPass)
-                                  onStatusChange("تم تفعيل شبكة القائد تلقائياً ($groupSsid)")
+                                  advertisePresenceAndGroup()
+                                  onStatusChange("شبكة القائد التلقائية جاهزة ($groupSsid)")
                                   onTopologyChanged("192.168.49.1")
                               }
                           }
                       }
                   }
 
-                  private fun advertiseGroupCredentials(ssid: String, pass: String) {
-                      if (ssid.isEmpty() || pass.isEmpty()) return
+                  private fun advertisePresenceAndGroup() {
+                      if (isSystemMobileHotspotActive()) return
                       val mgr = p2pManager ?: return
                       val ch = channel ?: return
                       runCatching {
                           localServiceInfo?.let { mgr.removeLocalService(ch, it, null) }
                           val record = mapOf(
-                              "ssid" to ssid,
-                              "pass" to pass,
+                              "id" to selfId.toString(),
+                              "pwr" to getSelfPowerScore().toString(),
+                              "go" to if (isGroupOwnerNow && groupSsid.isNotEmpty()) "1" else "0",
+                              "ssid" to groupSsid,
+                              "pass" to groupPass,
                               "goip" to "192.168.49.1"
                           )
                           val info = WifiP2pDnsSdServiceInfo.newInstance("_bikemic", "_udp", record)
                           localServiceInfo = info
                           mgr.addLocalService(ch, info, null)
-                          // Keep peer discovery active so followers can read the DNS-SD broadcast over Wi-Fi P2P
-                          mgr.discoverPeers(ch, null)
                       }
                   }
 
@@ -755,47 +1003,64 @@ jobs:
 
                       val txtListener = WifiP2pManager.DnsSdTxtRecordListener { fullDomain, record, device ->
                           if (!fullDomain.contains("_bikemic")) return@DnsSdTxtRecordListener
-                          if (shouldHostGroup || isConnectedNow) return@DnsSdTxtRecordListener
+                          val remoteId = record["id"]?.toLongOrNull() ?: return@DnsSdTxtRecordListener
+                          if (remoteId == selfId) return@DnsSdTxtRecordListener
 
+                          val remotePwr = record["pwr"]?.toIntOrNull() ?: 100
+                          val remoteIsGo = record["go"] == "1"
                           val ssid = record["ssid"] ?: ""
                           val pass = record["pass"] ?: ""
                           val goIp = record["goip"] ?: "192.168.49.1"
-                          groupOwnerIp = goIp
-
                           val now = System.currentTimeMillis()
-                          if (now - lastConnectAttemptMs < 7000L) return@DnsSdTxtRecordListener
-                          lastConnectAttemptMs = now
 
-                          onStatusChange("تم العثور على شبكة القائد ($ssid) • جاري الربط التلقائي...")
-                          connectToDiscoveredLeader(device, ssid, pass)
+                          nearbyCandidates[remoteId] = DiscoveredP2pCandidate(
+                              nodeId = remoteId,
+                              powerScore = remotePwr,
+                              isHostingGroup = remoteIsGo,
+                              ssid = ssid,
+                              pass = pass,
+                              device = device,
+                              seenAtMs = now
+                          )
+
+                          // Case 1: Both phones created a group at the same time (collision!), and the other phone is stronger:
+                          if (isGroupOwnerNow && remoteIsGo && isStrongerThanSelf(remotePwr, remoteId) && getActiveUdpPeerCount() == 0) {
+                              onStatusChange("منع تضارب الشبكة: التحويل تلقائياً إلى شبكة الهاتف الأقوى...")
+                              onElectLeaderFromP2p(remoteId)
+                              mgr.removeGroup(ch, object : WifiP2pManager.ActionListener {
+                                  override fun onSuccess() {
+                                      isGroupOwnerNow = false
+                                      isConnectedNow = false
+                                      groupSsid = ""
+                                      groupPass = ""
+                                      connectToDiscoveredLeader(device, ssid, pass)
+                                  }
+                                  override fun onFailure(r: Int) {}
+                              })
+                              return@DnsSdTxtRecordListener
+                          }
+
+                          // Case 2: We are not in a group, and the other phone is already hosting a group -> join immediately!
+                          if (!isGroupOwnerNow && !isConnectedNow && remoteIsGo && ssid.isNotEmpty()) {
+                              if (now - lastConnectAttemptMs >= 5500L) {
+                                  lastConnectAttemptMs = now
+                                  groupOwnerIp = goIp
+                                  onElectLeaderFromP2p(remoteId)
+                                  onStatusChange("جاري الربط التلقائي بشبكة القائد ($ssid)...")
+                                  connectToDiscoveredLeader(device, ssid, pass)
+                              }
+                          }
                       }
 
                       val servListener = WifiP2pManager.DnsSdServiceResponseListener { _, _, _ -> }
                       mgr.setDnsSdResponseListeners(ch, servListener, txtListener)
                   }
 
-                  private fun startClientDiscovery() {
-                      if (shouldHostGroup || isConnectedNow) return
+                  private fun startServiceDiscoverySweep() {
+                      if (isSystemMobileHotspotActive()) return
                       val mgr = p2pManager ?: return
                       val ch = channel ?: return
 
-                      onStatusChange("البحث التلقائي عن شبكة القائد (بدون إعداد يدوي)...")
-
-                      // 1. On Android 10+ (API 29+), also try direct deterministic group connection if Leader uses Android 10+
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                          val now = System.currentTimeMillis()
-                          if (now - lastConnectAttemptMs > 8000L) {
-                              runCatching {
-                                  val cfg = WifiP2pConfig.Builder()
-                                      .setNetworkName("DIRECT-BM-BIKEMIC")
-                                      .setPassphrase("bikemic1234")
-                                      .build()
-                                  mgr.connect(ch, cfg, null)
-                              }
-                          }
-                      }
-
-                      // 2. Discover any DNS-SD service broadcasted by the Leader (works across all Android 8..14 devices)
                       runCatching {
                           mgr.clearServiceRequests(ch, object : WifiP2pManager.ActionListener {
                               override fun onSuccess() {
@@ -817,10 +1082,10 @@ jobs:
                   }
 
                   private fun connectToDiscoveredLeader(device: WifiP2pDevice?, ssid: String, pass: String) {
+                      if (isSystemMobileHotspotActive() || isGroupOwnerNow) return
                       val mgr = p2pManager ?: return
                       val ch = channel ?: return
 
-                      // Method A: Android 10+ seamless P2P group join with exact SSID & Passphrase (zero confirmation dialog!)
                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && ssid.startsWith("DIRECT-") && pass.length >= 8) {
                           val cfg = WifiP2pConfig.Builder()
                               .setNetworkName(ssid)
@@ -845,8 +1110,8 @@ jobs:
                       val mgr = p2pManager
                       val ch = channel
 
-                      // Method B: Connect via standard Wi-Fi P2P device address (Joining existing Group Owner requires no prompt on GO)
-                      if (mgr != null && ch != null && device != null && device.deviceAddress.isNotEmpty()) {
+                      // Only connect via P2P device if that device is ALREADY a Group Owner (prevents 2-way GO negotiation collision)
+                      if (mgr != null && ch != null && device != null && device.deviceAddress.isNotEmpty() && device.isGroupOwner) {
                           val cfg = WifiP2pConfig().apply {
                               deviceAddress = device.deviceAddress
                               wps.setup = WpsInfo.PBC
@@ -920,6 +1185,7 @@ jobs:
                       }
                       receiver = object : BroadcastReceiver() {
                           override fun onReceive(ctx: Context?, intent: Intent?) {
+                              if (isSystemMobileHotspotActive()) return
                               val act = intent?.action ?: return
                               val mgr = p2pManager ?: return
                               val ch = channel ?: return
@@ -938,7 +1204,7 @@ jobs:
                                                       groupSsid = grp.networkName ?: ""
                                                       groupPass = grp.passphrase ?: ""
                                                       if (grp.isGroupOwner) {
-                                                          advertiseGroupCredentials(groupSsid, groupPass)
+                                                          advertisePresenceAndGroup()
                                                       }
                                                   }
                                               }
@@ -949,16 +1215,14 @@ jobs:
                                       }
                                   }
                                   WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
-                                      if (!shouldHostGroup && !isConnectedNow) {
+                                      if (!isGroupOwnerNow && !isConnectedNow) {
                                           mgr.requestPeers(ch) { peers ->
-                                              val goCandidate = peers.deviceList.firstOrNull { dev ->
-                                                  dev.isGroupOwner || dev.deviceName.contains("BikeMic", ignoreCase = true)
-                                              }
-                                              if (goCandidate != null) {
+                                              val existingGo = peers.deviceList.firstOrNull { it.isGroupOwner }
+                                              if (existingGo != null) {
                                                   val now = System.currentTimeMillis()
-                                                  if (now - lastConnectAttemptMs > 7000L) {
+                                                  if (now - lastConnectAttemptMs > 6000L) {
                                                       lastConnectAttemptMs = now
-                                                      connectViaP2pDeviceOrWifi(goCandidate, "", "")
+                                                      connectViaP2pDeviceOrWifi(existingGo, "", "")
                                                   }
                                               }
                                           }
@@ -992,8 +1256,8 @@ jobs:
 
           # =========================================================
           # 8. MeshVoiceEngine.kt
-          #    - Integrates AutoMeshHotspotManager (zero-touch automatic Hotspot/Wi-Fi Direct connection)
-          #    - Automatic Leader & Hotspot Group handover when battery <= 3%
+          #    - Integrates Anti-Collision AutoMeshHotspotManager + 30% Battery & Device Power Election
+          #    - Automatic failover when Leader phone powers off or disconnects
           #    - Little-Endian G.711 u-law 8-bit ultra-lightweight audio (320 bytes/frame = 20ms)
           #    - Full Mesh Gossip so ALL riders see all connected names
           #    - Instant PTT Burst Delivery Confirmation (ACKs with Rider names + Sound/Vibration)
@@ -1066,14 +1330,15 @@ jobs:
                   @Volatile var batteryPct: Int = 100
                   @Volatile var isCharging: Boolean = false
                   @Volatile var thermalStatus: Int = 0
+                  val hardwareSpecScore: Int = DeviceHealthMonitor.computeHardwareSpecScore(context)
 
                   val peersListState = mutableStateListOf<PeerInfo>()
                   val peersVersion = mutableIntStateOf(0)
                   val connectedCount = mutableIntStateOf(0)
                   val currentHostIdState = mutableLongStateOf(selfId)
                   val currentEpochState = mutableLongStateOf(0L)
-                  val statusText = mutableStateOf("جاري التجهيز والربط التلقائي...")
-                  val autoNetBanner = mutableStateOf("تفعيل الشبكة التلقائية...")
+                  val statusText = mutableStateOf("جاري فحص الشبكة واختيار الهاتف الأقوى...")
+                  val autoNetBanner = mutableStateOf("منع تضارب الشبكات: فحص القائد الأقوى...")
                   val activeSpeakerName = mutableStateOf<String?>(null)
                   val leaderChangeEvent = mutableStateOf<String?>(null)
 
@@ -1112,8 +1377,8 @@ jobs:
                   private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
                   private val seqCounter = AtomicInteger(1)
 
-                  // minBattery = 3 -> Leader hands over leadership & Hotspot automatically if battery <= 3%
-                  private val election = LeaderElection(selfId, minBattery = 3)
+                  // minHealthyBattery = 30 -> Leader hands over when battery < 30% (unless all phones are < 30%)
+                  private val election = LeaderElection(selfId, minHealthyBattery = 30)
                   private var autoHotspot: AutoMeshHotspotManager? = null
                   private var multicastLock: WifiManager.MulticastLock? = null
                   private var wifiLock: WifiManager.WifiLock? = null
@@ -1156,6 +1421,28 @@ jobs:
                       val ulawByte = (sign or (exponent shl 4) or mantissa).inv()
                       return ulawByte.toByte()
                   }
+
+                  fun getSelfPowerScoreInt(): Int =
+                      election.devicePowerScore(batteryPct, isCharging, thermalStatus, hardwareSpecScore).toInt()
+
+                  fun getPeerPowerScoreInt(p: PeerInfo): Int =
+                      election.peerPowerScore(p).toInt()
+
+                  private fun buildSelfPeerInfo(nowMs: Long = System.currentTimeMillis()): PeerInfo =
+                      PeerInfo(
+                          nodeId = selfId,
+                          name = userName,
+                          chainRank = chainRank,
+                          batteryPct = batteryPct,
+                          isCharging = isCharging,
+                          thermalStatus = thermalStatus,
+                          hardwareSpecScore = hardwareSpecScore,
+                          epoch = election.currentEpoch,
+                          currentHostId = election.currentHostId,
+                          ipAddress = "",
+                          lastSeenMs = nowMs,
+                          handshakeOk = true
+                      )
 
                   fun setPttPressed(pressed: Boolean) {
                       if (pressed && !pttActiveInternal) {
@@ -1224,27 +1511,33 @@ jobs:
                           am.isSpeakerphoneOn = true
                       }
 
-                      // Always include standard Wi-Fi Direct Group Owner IP (192.168.49.1) in hint targets
                       knownHintIps.add("192.168.49.1")
 
-                      // Start Zero-Touch Auto-Hotspot / Auto-Discovery Manager
-                      val shouldStartAsHost = (chainRank == 1) && (batteryPct > 3 || isCharging)
-                      if (shouldStartAsHost) {
-                          val (h, ep) = election.declareSelfAsHost()
-                          currentHostIdState.longValue = h
-                          currentEpochState.longValue = ep
-                      }
+                      // Start Anti-Collision AutoMeshHotspotManager (Listens first & elects strongest phone!)
                       autoHotspot = AutoMeshHotspotManager(
                           context = context,
+                          selfId = selfId,
+                          getSelfPowerScore = { getSelfPowerScoreInt() },
+                          getActiveUdpPeerCount = { peersMap.values.count { it.handshakeOk } },
                           onStatusChange = { msg ->
                               mainScope.launch { autoNetBanner.value = msg }
                           },
                           onTopologyChanged = { goIp ->
                               if (!goIp.isNullOrEmpty()) knownHintIps.add(goIp)
                               scope.launch { sendHeartbeatNow() }
+                          },
+                          onElectLeaderFromP2p = { leaderNodeId ->
+                              if (leaderNodeId == selfId) {
+                                  val (h, ep) = election.declareSelfAsHost()
+                                  currentHostIdState.longValue = h
+                                  currentEpochState.longValue = ep
+                              } else {
+                                  election.forceSetHost(leaderNodeId, election.currentEpoch)
+                                  currentHostIdState.longValue = election.currentHostId
+                              }
                           }
                       ).also {
-                          it.start(initialShouldHost = shouldStartAsHost)
+                          it.start()
                       }
 
                       scope.launch {
@@ -1261,6 +1554,15 @@ jobs:
                   }
 
                   fun stop() {
+                      // Send graceful GOODBYE packet before shutting down so other phones immediately hand over leadership
+                      runCatching {
+                          val bye = JSONObject().apply {
+                              put("t", "GOODBYE")
+                              put("id", selfId)
+                              put("epoch", election.currentEpoch)
+                          }
+                          sendToAllDiscoveryTargets(bye)
+                      }
                       scope.cancel()
                       mainScope.cancel()
                       runCatching { autoHotspot?.stop() }
@@ -1274,18 +1576,8 @@ jobs:
                   }
 
                   fun updateUser(newName: String, newRank: Int) {
-                      val oldRank = chainRank
                       userName = newName
                       chainRank = newRank
-                      if (oldRank != newRank) {
-                          val shouldBeHost = (newRank == 1 && (batteryPct > 3 || isCharging))
-                          if (shouldBeHost) {
-                              val (h, ep) = election.declareSelfAsHost()
-                              currentHostIdState.longValue = h
-                              currentEpochState.longValue = ep
-                          }
-                          autoHotspot?.setRole(shouldBeHost)
-                      }
                       syncPeersToCompose()
                       scope.launch { sendHeartbeatNow() }
                   }
@@ -1368,13 +1660,11 @@ jobs:
                           }
                       }
 
-                      // Always add standard Wi-Fi Direct Group Owner IP & Broadcast (192.168.49.1 / 192.168.49.255)
                       if ("192.168.49.1" !in localIps) {
                           runCatching { targets.add(InetAddress.getByName("192.168.49.1")) }
                       }
                       runCatching { targets.add(InetAddress.getByName("192.168.49.255")) }
 
-                      // Read Hotspot/Router Gateway IP from ConnectivityManager
                       runCatching {
                           val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                           for (net in cm.allNetworks) {
@@ -1391,7 +1681,6 @@ jobs:
                           }
                       }
 
-                      // Read WiFi DHCP Gateway fallback
                       runCatching {
                           val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                           @Suppress("DEPRECATION")
@@ -1409,7 +1698,6 @@ jobs:
                           }
                       }
 
-                      // Read ARP neighbors
                       runCatching {
                           val arpFile = File("/proc/net/arp")
                           if (arpFile.canRead()) {
@@ -1507,7 +1795,7 @@ jobs:
                       val now = System.currentTimeMillis()
                       val peersArr = JSONArray()
                       peersMap.values.forEach { p ->
-                          if (now - p.lastSeenMs < 9000L && p.ipAddress.isNotEmpty()) {
+                          if (now - p.lastSeenMs < 7000L && p.ipAddress.isNotEmpty()) {
                               peersArr.put(JSONObject().apply {
                                   put("id", p.nodeId)
                                   put("ip", p.ipAddress)
@@ -1516,6 +1804,7 @@ jobs:
                                   put("bat", p.batteryPct)
                                   put("chg", p.isCharging)
                                   put("thm", p.thermalStatus)
+                                  put("hw", p.hardwareSpecScore)
                                   put("epoch", p.epoch)
                                   put("host", p.currentHostId)
                                   put("age", (now - p.lastSeenMs).coerceAtLeast(0L))
@@ -1530,6 +1819,7 @@ jobs:
                           put("bat", batteryPct)
                           put("chg", isCharging)
                           put("thm", thermalStatus)
+                          put("hw", hardwareSpecScore)
                           put("epoch", election.currentEpoch)
                           put("host", election.currentHostId)
                           put("peers", peersArr)
@@ -1631,6 +1921,7 @@ jobs:
                                       batteryPct = msg.optInt("bat", existed?.batteryPct ?: 100),
                                       isCharging = msg.optBoolean("chg", existed?.isCharging ?: false),
                                       thermalStatus = msg.optInt("thm", existed?.thermalStatus ?: 0),
+                                      hardwareSpecScore = msg.optInt("hw", existed?.hardwareSpecScore ?: 20),
                                       epoch = msg.optLong("epoch", existed?.epoch ?: 0L),
                                       currentHostId = msg.optLong("host", senderId),
                                       ipAddress = senderIp.ifEmpty { existed?.ipAddress ?: "" },
@@ -1646,7 +1937,6 @@ jobs:
                                   if (remoteHost > 0L && election.acceptHostAnnouncement(remoteHost, remoteEpoch)) {
                                       currentHostIdState.longValue = election.currentHostId
                                       currentEpochState.longValue = election.currentEpoch
-                                      autoHotspot?.setRole(election.currentHostId == selfId)
                                   }
 
                                   // Full Mesh Gossip table
@@ -1662,13 +1952,14 @@ jobs:
                                           val gBat = gp.optInt("bat", 100)
                                           val gChg = gp.optBoolean("chg", false)
                                           val gThm = gp.optInt("thm", 0)
+                                          val gHw = gp.optInt("hw", 20)
                                           val gEpoch = gp.optLong("epoch", 0L)
                                           val gHost = gp.optLong("host", gId)
-                                          val gAge = gp.optLong("age", 0L).coerceIn(0L, 8000L)
+                                          val gAge = gp.optLong("age", 0L).coerceIn(0L, 6000L)
                                           val inferredSeen = now - gAge
 
                                           val currentEntry = peersMap[gId]
-                                          if (currentEntry == null || (inferredSeen > currentEntry.lastSeenMs + 1500L)) {
+                                          if (currentEntry == null || (inferredSeen > currentEntry.lastSeenMs + 1200L)) {
                                               val resolvedIp = if (gIp.isNotEmpty() && gIp !in cachedLocalIps) gIp else (currentEntry?.ipAddress ?: senderIp)
                                               peersMap[gId] = PeerInfo(
                                                   nodeId = gId,
@@ -1677,6 +1968,7 @@ jobs:
                                                   batteryPct = gBat,
                                                   isCharging = gChg,
                                                   thermalStatus = gThm,
+                                                  hardwareSpecScore = gHw,
                                                   epoch = gEpoch,
                                                   currentHostId = gHost,
                                                   ipAddress = resolvedIp,
@@ -1750,11 +2042,25 @@ jobs:
                               "STEP_DOWN" -> {
                                   val epoch = msg.optLong("epoch", 0L)
                                   val nextHostId = msg.optLong("nextHostId", -1L)
+                                  val reason = msg.optString("reason", "تبديل تلقائي")
                                   if (epoch >= election.currentEpoch) {
-                                      statusText.value = "بطارية القائد أقل من 3%... جاري استلام القيادة تلقائياً"
+                                      statusText.value = "تبديل القائد ($reason)..."
                                       if (nextHostId == selfId) {
-                                          promoteSelfToLeaderAndHost(minEpoch = epoch)
+                                          promoteSelfToLeaderAndHost(minEpoch = epoch, reason = reason)
+                                      } else if (nextHostId > 0L) {
+                                          election.forceSetHost(nextHostId, epoch + 1L)
+                                          currentHostIdState.longValue = election.currentHostId
+                                          currentEpochState.longValue = election.currentEpoch
                                       }
+                                  }
+                              }
+                              "GOODBYE" -> {
+                                  // Peer turned off / closed app -> immediately remove and trigger election if it was Leader!
+                                  val wasHost = (senderId == election.currentHostId)
+                                  peersMap.remove(senderId)
+                                  syncPeersToCompose()
+                                  if (wasHost) {
+                                      electStrongestRemainingLeaderNow("إغلاق هاتف القائد السابق")
                                   }
                               }
                               "I_AM_HOST" -> {
@@ -1763,9 +2069,8 @@ jobs:
                                   if (newHost > 0L && election.acceptHostAnnouncement(newHost, epoch)) {
                                       currentHostIdState.longValue = election.currentHostId
                                       currentEpochState.longValue = election.currentEpoch
-                                      autoHotspot?.setRole(newHost == selfId)
                                       val hostName = if (newHost == selfId) userName else (peersMap[newHost]?.name ?: "راكب")
-                                      leaderChangeEvent.value = "القائد الجديد: $hostName"
+                                      leaderChangeEvent.value = "القائد الحالي (الأقوى): $hostName"
                                       statusText.value = "متصل • القائد: $hostName"
                                   }
                               }
@@ -1775,11 +2080,11 @@ jobs:
                       }
                   }
 
-                  private fun promoteSelfToLeaderAndHost(minEpoch: Long = election.currentEpoch) {
+                  private fun promoteSelfToLeaderAndHost(minEpoch: Long = election.currentEpoch, reason: String = "الأقوى جهازاً وبطارية") {
                       val (newHost, newEpoch) = election.declareSelfAsHost(minEpoch)
                       currentHostIdState.longValue = newHost
                       currentEpochState.longValue = newEpoch
-                      autoHotspot?.setRole(true)
+                      autoHotspot?.promoteToHostNow()
                       val announce = JSONObject().apply {
                           put("t", "I_AM_HOST")
                           put("id", newHost)
@@ -1788,12 +2093,33 @@ jobs:
                       repeat(3) {
                           sendToAllDiscoveryTargets(announce)
                       }
-                      leaderChangeEvent.value = "أصبحت أنت قائد السلسلة (تم تفعيل نقطة الاتصال تلقائياً)"
+                      leaderChangeEvent.value = "أصبحت أنت القائد ($reason)"
+                      syncPeersToCompose()
+                  }
+
+                  private fun electStrongestRemainingLeaderNow(reason: String) {
+                      val selfPeer = buildSelfPeerInfo()
+                      val winner = election.pickBestLeader(selfPeer, peersMap.values)
+                      if (winner != null) {
+                          if (winner.nodeId == selfId) {
+                              promoteSelfToLeaderAndHost(reason = reason)
+                          } else {
+                              election.forceSetHost(winner.nodeId, election.currentEpoch + 1L)
+                              currentHostIdState.longValue = election.currentHostId
+                              currentEpochState.longValue = election.currentEpoch
+                              leaderChangeEvent.value = "انتقلت القيادة تلقائياً إلى ${winner.name} ($reason)"
+                              syncPeersToCompose()
+                          }
+                      }
                   }
 
                   private fun syncPeersToCompose() {
                       val sorted = peersMap.values.filter { it.handshakeOk }
-                          .sortedWith(compareBy<PeerInfo> { it.chainRank }.thenBy { it.name })
+                          .sortedWith(
+                              compareByDescending<PeerInfo> { election.peerPowerScore(it) }
+                                  .thenBy { it.chainRank }
+                                  .thenBy { it.name }
+                          )
                       val live = sorted.size
                       connectedCount.intValue = live
                       peersVersion.intValue += 1
@@ -1806,9 +2132,9 @@ jobs:
                       if (live > 0) {
                           val hostId = election.currentHostId
                           val hostName = if (hostId == selfId) "أنت ($userName)" else (peersMap[hostId]?.name ?: "راكب")
-                          statusText.value = "متصل تلقائياً ($live) • القائد: $hostName"
+                          statusText.value = "متصل ($live) • القائد: $hostName"
                       } else {
-                          statusText.value = "الربط التلقائي يعمل... افتح التطبيق في الهواتف الأخرى"
+                          statusText.value = "بانتظار اتصال الهواتف الأخرى تلقائياً..."
                       }
                   }
 
@@ -1818,88 +2144,73 @@ jobs:
                               runCatching {
                                   sendHeartbeatNow()
                                   val now = System.currentTimeMillis()
-                                  val dead = peersMap.filterValues { now - it.lastSeenMs > 9500L }.keys
+                                  // Fast 5.5s timeout so if Leader phone powers off/dies, remaining phones detect it quickly!
+                                  val dead = peersMap.filterValues { now - it.lastSeenMs > 5500L }.keys
                                   if (dead.isNotEmpty()) {
+                                      val hostDied = dead.contains(election.currentHostId)
                                       dead.forEach { peersMap.remove(it) }
+                                      if (hostDied) {
+                                          electStrongestRemainingLeaderNow("انقطاع/إغلاق هاتف القائد")
+                                      }
                                   }
                                   syncPeersToCompose()
                               }.onFailure {
                                   debugLastError.value = "HB: ${it.message}"
                               }
-                              delay(1200L + Random.nextLong(0L, 300L))
+                              delay(1000L + Random.nextLong(0L, 250L))
                           }
                       }
                   }
 
                   private fun startElectionLoop() {
                       scope.launch {
-                          var stepDownOriginId = -1L
-                          var electionTriggerMs = 0L
-
                           while (isActive) {
                               val now = System.currentTimeMillis()
                               val currentHost = election.currentHostId
-                              val hostMissing = currentHost != selfId && !peersMap.containsKey(currentHost)
+                              val selfPeer = buildSelfPeerInfo(now)
 
-                              if (peersMap.isNotEmpty() && election.currentEpoch == 0L && chainRank == 1 && (batteryPct > 3 || isCharging) && currentHost != selfId) {
-                                  promoteSelfToLeaderAndHost()
+                              // 1. If we have peers and are at initial epoch 0 (or current host is missing),
+                              //    automatically elect the phone with the highest Device Power Score!
+                              val hostMissing = currentHost != selfId && !peersMap.containsKey(currentHost)
+                              if (peersMap.isNotEmpty() && (election.currentEpoch == 0L || hostMissing)) {
+                                  val winner = election.pickBestLeader(selfPeer, peersMap.values)
+                                  if (winner != null) {
+                                      if (winner.nodeId == selfId && currentHost != selfId) {
+                                          promoteSelfToLeaderAndHost(reason = if (hostMissing) "انقطاع القائد السابق" else "الهاتف الأقوى والأعلى بطارية")
+                                      } else if (winner.nodeId != selfId && election.currentEpoch == 0L) {
+                                          election.forceSetHost(winner.nodeId, 1L)
+                                          currentHostIdState.longValue = election.currentHostId
+                                          currentEpochState.longValue = election.currentEpoch
+                                      }
+                                  }
                               }
 
-                              // Check if Leader battery is <= 3% (or severe thermal) -> Hand over to next rider immediately!
-                              if (currentHost == selfId && election.shouldStepDown(batteryPct, isCharging, thermalStatus, now)) {
-                                  if (electionTriggerMs == 0L && peersMap.isNotEmpty()) {
-                                      val selfPeer = PeerInfo(
-                                          nodeId = selfId, name = userName, chainRank = chainRank,
-                                          batteryPct = batteryPct, isCharging = isCharging,
-                                          thermalStatus = thermalStatus, epoch = election.currentEpoch,
-                                          currentHostId = election.currentHostId, ipAddress = "",
-                                          lastSeenMs = now, handshakeOk = true
-                                      )
-                                      val nextWinner = election.pickBestLeader(selfPeer, peersMap.values, excludeId = selfId)
-                                      val reason = if (batteryPct <= 3) "البطارية أقل من 3%" else "حرارة مرتفعة"
+                              // 2. If we ARE the current Leader:
+                              //    Check if our battery dropped below 30% (and at least one peer is >= 30%),
+                              //    OR if our phone temperature is severe (and a cooler peer exists).
+                              //    Note: If ALL phones are < 30% battery, findReplacementIfShouldStepDown returns null
+                              //    so we STAY as Leader without oscillating!
+                              if (currentHost == selfId && peersMap.isNotEmpty()) {
+                                  val replacementPair = election.findReplacementIfShouldStepDown(selfPeer, peersMap.values, now)
+                                  if (replacementPair != null) {
+                                      val (nextLeader, reason) = replacementPair
                                       val sd = JSONObject().apply {
                                           put("t", "STEP_DOWN")
                                           put("id", selfId)
                                           put("epoch", election.currentEpoch)
-                                          put("nextHostId", nextWinner?.nodeId ?: -1L)
+                                          put("nextHostId", nextLeader.nodeId)
                                           put("reason", reason)
                                       }
                                       repeat(3) {
                                           sendToAllDiscoveryTargets(sd)
                                       }
-                                      if (nextWinner != null) {
-                                          election.acceptHostAnnouncement(nextWinner.nodeId, election.currentEpoch + 1L)
-                                          currentHostIdState.longValue = election.currentHostId
-                                          currentEpochState.longValue = election.currentEpoch
-                                      }
-                                      // Shut down our Hotspot Group so the new Leader takes over seamlessly
+                                      election.forceSetHost(nextLeader.nodeId, election.currentEpoch + 1L)
+                                      currentHostIdState.longValue = election.currentHostId
+                                      currentEpochState.longValue = election.currentEpoch
                                       autoHotspot?.stepDownHostGroupNow()
-                                      stepDownOriginId = selfId
-                                      electionTriggerMs = now
-                                      leaderChangeEvent.value = "انتقلت القيادة إلى ${nextWinner?.name ?: "الدراج التالي"} لأن بطاريتك ≤ 3%"
-                                      statusText.value = "تم تسليم القيادة ($reason)"
+                                      leaderChangeEvent.value = "انتقلت القيادة تلقائياً إلى ${nextLeader.name} ($reason)"
+                                      statusText.value = "تم نقل القيادة إلى ${nextLeader.name} ($reason)"
                                   }
-                              } else if (hostMissing && peersMap.isNotEmpty()) {
-                                  if (electionTriggerMs == 0L) {
-                                      stepDownOriginId = currentHost
-                                      electionTriggerMs = now
-                                  }
-                              }
-
-                              if (electionTriggerMs > 0L && now - electionTriggerMs > 1500L) {
-                                  val selfPeer = PeerInfo(
-                                      nodeId = selfId, name = userName, chainRank = chainRank,
-                                      batteryPct = batteryPct, isCharging = isCharging,
-                                      thermalStatus = thermalStatus, epoch = election.currentEpoch,
-                                      currentHostId = election.currentHostId, ipAddress = "",
-                                      lastSeenMs = now, handshakeOk = true
-                                  )
-                                  val winner = election.pickBestLeader(selfPeer, peersMap.values, excludeId = stepDownOriginId)
-                                  if (winner != null && winner.nodeId == selfId) {
-                                      promoteSelfToLeaderAndHost()
-                                  }
-                                  electionTriggerMs = 0L
-                                  stepDownOriginId = -1L
                               }
 
                               delay(1000L)
@@ -1912,7 +2223,7 @@ jobs:
                       val activePeers = peersMap.values.filter { it.handshakeOk && it.ipAddress.isNotEmpty() }
                       for (p in activePeers) {
                           if (p.ipAddress == excludeIp) continue
-                          if (!selectAllPeers && !allowedPeerIds.contains(p.nodeId) && p.chainRank != 1 && excludeIp == null) continue
+                          if (!selectAllPeers && !allowedPeerIds.contains(p.nodeId) && p.nodeId != election.currentHostId && excludeIp == null) continue
                           runCatching { set.add(InetAddress.getByName(p.ipAddress)) }
                       }
                       if (set.isEmpty() || activePeers.any { !it.isDirect }) {
@@ -2008,7 +2319,7 @@ jobs:
                                       }
                                   }
 
-                                  val allowed = selectAllPeers || allowedPeerIds.contains(senderId) || rank == 1
+                                  val allowed = selectAllPeers || allowedPeerIds.contains(senderId) || senderId == election.currentHostId
                                   if (allowed) {
                                       val payloadLen = (pkt.length - HEADER_SIZE).coerceAtMost(SAMPLES_PER_FRAME)
                                       for (i in 0 until payloadLen) {
@@ -2036,7 +2347,7 @@ jobs:
                           runCatching { track.stop(); track.release() }
                       }
 
-                      // TRANSMITTER (PTT Telegram + Red Open Mic with DC-Block & Clean u-law Compression)
+                      // TRANSMITTER
                       scope.launch {
                           android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
                           val minBuf = AudioRecord.getMinBufferSize(
@@ -2231,6 +2542,7 @@ jobs:
                       enableLockScreenVisibility()
                       super.onCreate(savedInstanceState)
                       val prefs = getSharedPreferences("bikemic_p2p", Context.MODE_PRIVATE)
+                      val defaultName = Build.MODEL?.take(12)?.ifBlank { "دراج" } ?: "دراج"
 
                       val missing = requiredPermissions().any {
                           ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
@@ -2261,7 +2573,7 @@ jobs:
                                           BikeMicScreen(
                                               engine = engine!!,
                                               externalPttActive = volPtt,
-                                              initialName = prefs.getString("name", "أبو ناصر") ?: "أبو ناصر",
+                                              initialName = prefs.getString("name", defaultName) ?: defaultName,
                                               initialRank = prefs.getInt("rank", 1),
                                               onSave = { n, r ->
                                                   prefs.edit().putString("name", n).putInt("rank", r).apply()
@@ -2312,8 +2624,9 @@ jobs:
                   private fun startAll() {
                       if (engine == null) {
                           val prefs = getSharedPreferences("bikemic_p2p", Context.MODE_PRIVATE)
+                          val defaultName = Build.MODEL?.take(12)?.ifBlank { "دراج" } ?: "دراج"
                           val e = MeshVoiceEngine(this).apply {
-                              userName = prefs.getString("name", "أبو ناصر") ?: "أبو ناصر"
+                              userName = prefs.getString("name", defaultName) ?: defaultName
                               chainRank = prefs.getInt("rank", 1)
                           }
                           engine = e
@@ -2414,14 +2727,14 @@ jobs:
                               ) {
                                   Text(
                                       "راكب #$rank",
-                                      color = if (rank == 1) Color(0xFFFFD60A) else Color.LightGray,
+                                      color = if (isHost) Color(0xFFFFD60A) else Color.LightGray,
                                       fontWeight = FontWeight.Bold, fontSize = 13.sp
                                   )
                               }
                           }
                       }
 
-                      // Header + Zero-Touch Auto-Network Banner + Live Connected Rider Chips
+                      // Header + Anti-Collision Auto-Network Banner + Live Connected Rider Chips
                       Column(
                           Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(top = 50.dp),
                           horizontalAlignment = Alignment.CenterHorizontally
@@ -2475,9 +2788,14 @@ jobs:
                           }
 
                           Text(
-                              if (isHost) "أنت القائد (نقطة اتصال تلقائية) • التحويل عند ≤ 3%" else "خلف القائد (ربط تلقائي) • بطاريتك ${engine.batteryPct}%",
+                              if (isHost) {
+                                  "⭐ أنت القائد (الأقوى: ${engine.getSelfPowerScoreInt()} نقطة • بطارية ${engine.batteryPct}% • حرارة ${thermalLabel(engine.thermalStatus)})"
+                              } else {
+                                  "متصل بالقائد • قوتك ${engine.getSelfPowerScoreInt()} • بطارية ${engine.batteryPct}% • ${thermalLabel(engine.thermalStatus)}"
+                              },
                               color = if (isHost) Color(0xFFFFD60A) else Color(0xFF8E8E93),
-                              fontSize = 11.sp
+                              fontSize = 11.sp,
+                              textAlign = TextAlign.Center
                           )
 
                           if (peers.isNotEmpty()) {
@@ -2502,7 +2820,7 @@ jobs:
                                           verticalAlignment = Alignment.CenterVertically
                                       ) {
                                           Text(
-                                              text = (if (isPeerHost) "⭐ " else "🏍️ ") + "${p.name} (#${p.chainRank})" + (if (didAck) " ✓" else ""),
+                                              text = (if (isPeerHost) "⭐ " else "🏍️ ") + "${p.name} (${p.batteryPct}%)" + (if (didAck) " ✓" else ""),
                                               color = Color.White,
                                               fontSize = 12.sp,
                                               fontWeight = FontWeight.SemiBold
@@ -2627,10 +2945,11 @@ jobs:
                                           verticalAlignment = Alignment.CenterVertically
                                       ) {
                                           Text(
-                                              "أنت: $name (راكب #$rank)" + if (isHost) " ⭐ القائد" else "",
+                                              "أنت: $name • قوة ${engine.getSelfPowerScoreInt()} • بطارية ${engine.batteryPct}%" +
+                                                  if (isHost) " ⭐ القائد" else "",
                                               color = Color(0xFFFFD60A),
                                               fontWeight = FontWeight.Bold,
-                                              fontSize = 13.sp
+                                              fontSize = 12.sp
                                           )
                                       }
                                       Spacer(Modifier.height(6.dp))
@@ -2658,7 +2977,7 @@ jobs:
                                       Spacer(Modifier.height(8.dp))
                                       if (peers.isEmpty()) {
                                           Text(
-                                              "جاري البحث والربط التلقائي عبر Wi-Fi Direct... تأكد من اختيار (راكب #1) في هاتف القائد و(راكب #2، #3...) في بقية الهواتف.",
+                                              "جاري الفحص التلقائي... الهاتف الأقوى فقط ينشئ الشبكة، وبقية الهواتف ترتبط به تلقائياً بدون تضارب.",
                                               color = Color.Gray, fontSize = 13.sp
                                           )
                                       } else {
@@ -2683,14 +3002,14 @@ jobs:
                                                       })
                                                       Column(Modifier.weight(1f)) {
                                                           Text(
-                                                              "راكب #${p.chainRank}: ${p.name}" +
-                                                                  (if (isHostP) " ⭐ (القائد)" else "") +
+                                                              "${p.name} (#${p.chainRank})" +
+                                                                  (if (isHostP) " ⭐ (القائد الأقوى)" else "") +
                                                                   (if (acked) " • ✓ استلم البرقية" else ""),
                                                               color = if (isHostP) Color(0xFFFFD60A) else Color.White,
                                                               fontWeight = FontWeight.Bold, fontSize = 14.sp
                                                           )
                                                           Text(
-                                                              "IP: ${p.ipAddress} • بطارية ${p.batteryPct}% • ${thermalLabel(p.thermalStatus)}",
+                                                              "قوة الهاتف: ${engine.getPeerPowerScoreInt(p)} • بطارية ${p.batteryPct}% • ${thermalLabel(p.thermalStatus)}",
                                                               color = Color(0xFF32D74B),
                                                               fontSize = 11.sp
                                                           )
@@ -2714,11 +3033,11 @@ jobs:
                           AlertDialog(
                               onDismissRequest = { showRankDlg = false },
                               containerColor = Color(0xFF1C1C1E),
-                              title = { Text("ترتيبك في السلسلة", color = Color.White) },
+                              title = { Text("رقمك في مجموعة الدراجين", color = Color.White) },
                               text = {
                                   LazyColumn(Modifier.height(280.dp)) {
                                       items((1..12).toList()) { num ->
-                                          val label = if (num == 1) "1 = قائد السلسلة (ينشئ الشبكة تلقائياً)" else "$num (يرتبط بالقائد تلقائياً)"
+                                          val label = "راكب #$num"
                                           TextButton(
                                               onClick = {
                                                   rank = num; engine.updateUser(name, num); onSave(name, num)
@@ -2745,17 +3064,21 @@ jobs:
                           AlertDialog(
                               onDismissRequest = { showInfo = false },
                               containerColor = Color(0xFF1C1C1E),
-                              title = { Text("تشخيص الشبكة التلقائية والصوت", color = Color.White, fontWeight = FontWeight.Bold) },
+                              title = { Text("تشخيص القائد الذكي والشبكة", color = Color.White, fontWeight = FontWeight.Bold) },
                               text = {
                                   Column(
                                       modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
                                       verticalArrangement = Arrangement.spacedBy(5.dp)
                                   ) {
-                                      Text("معرفك: ${engine.selfId}", color = Color.Gray, fontSize = 11.sp)
-                                      Text("القائد: ${if (isHost) "أنت ($name)" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")}", color = Color.White, fontSize = 12.sp)
-                                      Text("شرط تبديل القائد تلقائياً: البطارية ≤ 3%", color = Color(0xFFFFD60A), fontSize = 11.sp)
+                                      Text("قوة هاتفك الإجمالية: ${engine.getSelfPowerScoreInt()} نقطة (مواصفات الجهاز: ${engine.hardwareSpecScore})", color = Color(0xFFFFD60A), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                      Text("القائد الحالي: ${if (isHost) "أنت ($name)" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")}", color = Color.White, fontSize = 12.sp)
+                                      Text("قواعد القيادة الذكية:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                      Text("• الأولوية للهاتف الأقوى (بطارية ≥ 30% + برودة الجهاز + رام ومعالج).", color = Color.White, fontSize = 11.sp)
+                                      Text("• إذا نزلت بطارية القائد تحت 30% ينتقل لهاتف فوق 30% تلقائياً.", color = Color.White, fontSize = 11.sp)
+                                      Text("• إذا كان الجميع تحت 30% يظل القائد كما هو بدون تذبذب.", color = Color.White, fontSize = 11.sp)
+                                      Text("• إذا انطفأ هاتف القائد أو ارتفعت حرارته ينتقل تلقائياً للهاتف التالي.", color = Color.White, fontSize = 11.sp)
                                       if (gSsid.isNotEmpty()) {
-                                          Text("شبكة القائد التلقائية: $gSsid (كلمة المرور: $gPass)", color = Color(0xFF32D74B), fontSize = 11.sp)
+                                          Text("شبكة القائد التلقائية: $gSsid", color = Color(0xFF32D74B), fontSize = 11.sp)
                                       }
                                       HorizontalDivider(color = Color.DarkGray)
                                       Text("واجهات شبكتك:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
@@ -2767,14 +3090,8 @@ jobs:
                                           }
                                       }
                                       HorizontalDivider(color = Color.DarkGray)
-                                      Text("الأهداف النشطة (Unicast / Gateway / Broadcast):", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                      bcasts.forEach { b ->
-                                          Text("• $b", color = Color.White, fontSize = 11.sp)
-                                      }
-                                      HorizontalDivider(color = Color.DarkGray)
                                       Text("إحصائيات:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                      Text("• حزم أُرسلت: $sent", color = Color.White, fontSize = 12.sp)
-                                      Text("• حزم مستلمة من أقران: $received", color = Color.White, fontSize = 12.sp)
+                                      Text("• حزم أُرسلت: $sent | مستلمة: $received", color = Color.White, fontSize = 12.sp)
                                       Text("• أقران متصلون: ${peers.size}", color = Color.White, fontSize = 12.sp)
                                       Text("• حالة النظام: $lastErr", color = Color(0xFFFF9F0A), fontSize = 11.sp)
                                   }
@@ -2799,7 +3116,7 @@ jobs:
               }
           """)
 
-          print("BikeMic P2P Mesh project (Auto-Hotspot + 3% Handover + LockScreen + ACK) generated successfully.")
+          print("BikeMic P2P Mesh project (v8 Anti-Collision + 30% Power Election) generated successfully.")
           PYEOF
           python3 /tmp/gen_bikemic_p2p.py
 
