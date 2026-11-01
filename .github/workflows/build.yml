@@ -1,53 +1,4 @@
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-<meta charset="UTF-8">
-<title>BikeMic P2P Mesh - النسخة المحسّنة</title>
-<style>
-body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0d1117; color: #e6edf3; padding: 20px; line-height: 1.6; }
-.container { max-width: 1100px; margin: 0 auto; }
-h1 { color: #58a6ff; border-bottom: 2px solid #30363d; padding-bottom: 10px; }
-h2 { color: #3fb950; margin-top: 30px; }
-.box { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin: 16px 0; }
-.warning { background: #3d1f1f; border-color: #f85149; color: #ffb3b3; }
-.success { background: #1a2e1a; border-color: #3fb950; color: #a7f3a7; }
-code { background: #21262d; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
-pre { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 13px; direction: ltr; text-align: left; }
-ul { padding-right: 20px; }
-li { margin-bottom: 8px; }
-</style>
-</head>
-<body>
-<div class="container">
-
-<h1>BikeMic P2P Mesh — النسخة المحسّنة (مع إصلاحات الصوت وشاشة القفل)</h1>
-
-<div class="box success">
-<strong>ما تم إصلاحه وتحسينه في هذه النسخة:</strong>
-<ul>
-<li>إصلاح التشويش المتقطع وانعدام الصوت نهائياً عبر مخزن اهتزاز (Jitter Buffer) + تحسين حجم الإطارات وإعدادات AudioTrack/AudioRecord.</li>
-<li>المايك الأحمر (المفتوح) أصبح أسرع وأوضح بدون تأخير ملحوظ.</li>
-<li>قائمة «متصلون» تظهر الآن أسماء الجميع بوضوح للجميع (ليس للقائد فقط).</li>
-<li>زر البرقية يظهر على شاشة القفل عبر إشعار دائم + خدمة أمامية، ويمكن الضغط عليه مباشرة دون فتح التطبيق.</li>
-<li>تأكيد وصول البرقية: عند استلام البرقية يُرسل إقرار (ACK) ويظهر على جهاز المرسل «تم الاستلام من فلان».</li>
-<li>تحسين استقرار الشبكة والاكتشاف والريلاي.</li>
-</ul>
-</div>
-
-<div class="box warning">
-<strong>تعليمات الاستخدام:</strong>
-<ol>
-<li>انسخ المحتوى الكامل الموجود داخل المربع الأسود أدناه.</li>
-<li>استبدل ملف الـ Workflow القديم به (مثلاً <code>.github/workflows/build.yml</code>).</li>
-<li>ادفع التغييرات إلى الفرع <code>main</code> أو <code>master</code>.</li>
-<li>انتظر انتهاء البناء ثم حمّل الـ APK من قسم Artifacts.</li>
-</ol>
-</div>
-
-<h2>الملف الكامل للـ Workflow (انسخ كل ما بين السطرين)</h2>
-
-<pre style="white-space: pre; overflow-x: auto; max-height: 80vh;">
-name: Build BikeMic P2P Mesh APK (Diagnostics + LockScreen + AudioFix)
+name: Build BikeMic P2P Mesh APK (Auto-Connect + HD Audio + LockScreen + ACK)
 
 on:
   push:
@@ -58,13 +9,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: \( {{ github.workflow }}- \){{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -106,7 +57,7 @@ jobs:
           test -s app/release.keystore
           echo "Temporary keystore generated."
 
-      - name: Generate P2P Mesh project with Diagnostics + AudioFix + LockScreen
+      - name: Generate P2P Mesh project with Zero-Touch Auto-Hotspot, 3% Handover, LockScreen & ACK
         env:
           RUN_NUM: ${{ github.run_number }}
         run: |
@@ -222,7 +173,7 @@ jobs:
                   implementation 'androidx.compose.material:material-icons-extended'
                   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
               }
-          """.replace("VERSION_CODE", str(900 + run_num)).replace("VERSION_NAME", f"6.{run_num}"))
+          """.replace("VERSION_CODE", str(1000 + run_num)).replace("VERSION_NAME", f"7.{run_num}"))
 
           write("app/proguard-rules.pro", r"""
               -keep class com.bikemic.app.** { *; }
@@ -235,10 +186,6 @@ jobs:
               <?xml version="1.0" encoding="utf-8"?>
               <resources>
                   <string name="app_name">BikeMic</string>
-                  <string name="notification_channel_name">BikeMic خدمة الصوت</string>
-                  <string name="notification_title">BikeMic نشط</string>
-                  <string name="notification_text">اضغط زر البرقية من الإشعار أو افتح التطبيق</string>
-                  <string name="action_ptt">برقية</string>
               </resources>
           """)
 
@@ -306,7 +253,7 @@ jobs:
           """)
 
           # =========================================================
-          # 3. AndroidManifest
+          # 3. AndroidManifest (Auto P2P Hotspot + LockScreen + Audio)
           # =========================================================
           write("app/src/main/AndroidManifest.xml", r"""
               <?xml version="1.0" encoding="utf-8"?>
@@ -314,6 +261,7 @@ jobs:
 
                   <uses-permission android:name="android.permission.INTERNET" />
                   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+                  <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
                   <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
                   <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
                   <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
@@ -324,12 +272,10 @@ jobs:
                   <uses-permission android:name="android.permission.RECORD_AUDIO" />
                   <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
                   <uses-permission android:name="android.permission.WAKE_LOCK" />
-                  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-                  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-                  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+                  <uses-permission android:name="android.permission.VIBRATE" />
+                  <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
+                  <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
                   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-                  <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-                  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
                   <application
                       android:allowBackup="true"
@@ -338,24 +284,20 @@ jobs:
                       android:roundIcon="@mipmap/ic_launcher_round"
                       android:supportsRtl="true"
                       android:theme="@style/Theme.BikeMic">
-
                       <activity
                           android:name=".MainActivity"
                           android:exported="true"
+                          android:launchMode="singleTop"
                           android:screenOrientation="portrait"
-                          android:keepScreenOn="true"
-                          android:launchMode="singleTask">
+                          android:showWhenLocked="true"
+                          android:turnScreenOn="true"
+                          android:showOnLockScreen="true"
+                          android:keepScreenOn="true">
                           <intent-filter>
                               <action android:name="android.intent.action.MAIN" />
                               <category android:name="android.intent.category.LAUNCHER" />
                           </intent-filter>
                       </activity>
-
-                      <service
-                          android:name=".MeshService"
-                          android:enabled="true"
-                          android:exported="false"
-                          android:foregroundServiceType="microphone|connectedDevice" />
                   </application>
               </manifest>
           """)
@@ -377,7 +319,8 @@ jobs:
                   val currentHostId: Long,
                   val ipAddress: String,
                   val lastSeenMs: Long,
-                  val handshakeOk: Boolean
+                  val handshakeOk: Boolean,
+                  val isDirect: Boolean = true
               )
           """)
 
@@ -465,13 +408,15 @@ jobs:
 
           # =========================================================
           # 6. LeaderElection.kt
+          #    - Battery threshold set to 3% (if <= 3% and not charging, immediately step down!)
+          #    - At <= 3% battery, step-down is immediate (no 25s wait so phone doesn't die first!)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/LeaderElection.kt", r"""
               package com.bikemic.app
 
               class LeaderElection(
                   private val selfId: Long,
-                  private val minBattery: Int = 25,
+                  private val minBattery: Int = 3,
                   private val thermalHoldMs: Long = 25_000L
               ) {
                   @Volatile var currentHostId: Long = selfId
@@ -480,9 +425,9 @@ jobs:
                       private set
 
                   private var thermalHighSinceMs: Long = 0L
-                  private var lowBatSinceMs: Long = 0L
 
                   fun healthScore(bat: Int, chg: Boolean, thermal: Int): Double {
+                      if (bat <= minBattery && !chg) return -900.0
                       var s = bat.toDouble()
                       when (thermal) {
                           DeviceHealthMonitor.THERMAL_CRITICAL -> return -1000.0
@@ -496,17 +441,15 @@ jobs:
 
                   fun shouldStepDown(bat: Int, chg: Boolean, thermal: Int, nowMs: Long): Boolean {
                       if (currentHostId != selfId) return false
+                      // Immediate handover when battery drops to 3% or below (no delay so device doesn't shut off before handover)
+                      if (bat <= minBattery && !chg) {
+                          return true
+                      }
                       if (thermal >= DeviceHealthMonitor.THERMAL_SEVERE) {
                           if (thermalHighSinceMs == 0L) thermalHighSinceMs = nowMs
                           if (nowMs - thermalHighSinceMs >= thermalHoldMs) return true
                       } else {
                           thermalHighSinceMs = 0L
-                      }
-                      if (bat < minBattery && !chg) {
-                          if (lowBatSinceMs == 0L) lowBatSinceMs = nowMs
-                          if (nowMs - lowBatSinceMs >= thermalHoldMs) return true
-                      } else {
-                          lowBatSinceMs = 0L
                       }
                       return false
                   }
@@ -518,6 +461,7 @@ jobs:
                       return all
                           .asSequence()
                           .filter { it.nodeId != excludeId }
+                          .filter { it.batteryPct > minBattery || it.isCharging }
                           .filter { it.thermalStatus < DeviceHealthMonitor.THERMAL_CRITICAL }
                           .sortedWith(
                               compareBy<PeerInfo> { it.chainRank }
@@ -546,7 +490,513 @@ jobs:
           """)
 
           # =========================================================
-          # 7. MeshVoiceEngine.kt  (محسّن جداً للصوت + ACK + استقرار)
+          # 7. AutoMeshHotspotManager.kt
+          #    - Zero-Touch Automatic Hotspot & Client Connection using Wi-Fi Direct Autonomous Group (P2P GO)
+          #    - No manual phone Hotspot toggle needed!
+          #    - Leader (Rank 1 or elected Host) automatically creates a Wi-Fi Direct Hotspot Group (192.168.49.1)
+          #      and broadcasts SSID + Passphrase via DNS-SD Service Record (Zero-Popups!).
+          #    - Other riders automatically discover the DNS-SD record and connect seamlessly via
+          #      WifiNetworkSpecifier / WifiConfiguration / WifiP2pManager.
+          #    - If Leader battery drops <= 3%, Leader automatically closes its group and the next Rider
+          #      automatically starts the group!
+          # =========================================================
+          write("app/src/main/java/com/bikemic/app/AutoMeshHotspotManager.kt", r"""
+              package com.bikemic.app
+
+              import android.annotation.SuppressLint
+              import android.content.BroadcastReceiver
+              import android.content.Context
+              import android.content.Intent
+              import android.content.IntentFilter
+              import android.net.ConnectivityManager
+              import android.net.Network
+              import android.net.NetworkCapabilities
+              import android.net.NetworkRequest
+              import android.net.wifi.WifiConfiguration
+              import android.net.wifi.WifiManager
+              import android.net.wifi.WifiNetworkSpecifier
+              import android.net.wifi.WpsInfo
+              import android.net.wifi.p2p.WifiP2pConfig
+              import android.net.wifi.p2p.WifiP2pDevice
+              import android.net.wifi.p2p.WifiP2pInfo
+              import android.net.wifi.p2p.WifiP2pManager
+              import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
+              import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
+              import android.os.Build
+              import android.os.Looper
+              import kotlinx.coroutines.*
+
+              @SuppressLint("MissingPermission")
+              class AutoMeshHotspotManager(
+                  private val context: Context,
+                  private val onStatusChange: (String) -> Unit,
+                  private val onTopologyChanged: (goIp: String?) -> Unit
+              ) {
+                  private val p2pManager: WifiP2pManager? =
+                      context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
+                  private var channel: WifiP2pManager.Channel? = null
+                  private var receiver: BroadcastReceiver? = null
+                  private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+                  @Volatile var isGroupOwnerNow: Boolean = false
+                      private set
+                  @Volatile var isConnectedNow: Boolean = false
+                      private set
+                  @Volatile var groupSsid: String = ""
+                      private set
+                  @Volatile var groupPass: String = ""
+                      private set
+                  @Volatile var groupOwnerIp: String? = null
+                      private set
+
+                  @Volatile private var shouldHostGroup: Boolean = false
+                  @Volatile private var lastConnectAttemptMs: Long = 0L
+                  @Volatile private var activeNetCallback: ConnectivityManager.NetworkCallback? = null
+                  private var localServiceInfo: WifiP2pDnsSdServiceInfo? = null
+
+                  fun start(initialShouldHost: Boolean) {
+                      shouldHostGroup = initialShouldHost
+                      runCatching {
+                          val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                          @Suppress("DEPRECATION")
+                          if (!wifi.isWifiEnabled) {
+                              wifi.isWifiEnabled = true
+                          }
+                      }
+
+                      val mgr = p2pManager ?: run {
+                          onStatusChange("جهازك لا يدعم Wi-Fi Direct التلقائي")
+                          return
+                      }
+                      channel = mgr.initialize(context, Looper.getMainLooper(), null)
+
+                      registerP2pReceiver()
+                      setupDnsSdDiscoveryListener()
+
+                      scope.launch {
+                          delay(600L)
+                          applyRoleNow()
+                          while (isActive) {
+                              runCatching { maintainAutoConnection() }
+                              delay(5000L)
+                          }
+                      }
+                  }
+
+                  fun setRole(shouldBeHost: Boolean) {
+                      if (shouldHostGroup == shouldBeHost) return
+                      shouldHostGroup = shouldBeHost
+                      scope.launch {
+                          applyRoleNow()
+                      }
+                  }
+
+                  fun stepDownHostGroupNow() {
+                      shouldHostGroup = false
+                      val mgr = p2pManager ?: return
+                      val ch = channel ?: return
+                      runCatching {
+                          localServiceInfo?.let { mgr.removeLocalService(ch, it, null) }
+                          localServiceInfo = null
+                          mgr.removeGroup(ch, object : WifiP2pManager.ActionListener {
+                              override fun onSuccess() {
+                                  isGroupOwnerNow = false
+                                  isConnectedNow = false
+                                  groupSsid = ""
+                                  groupPass = ""
+                                  onStatusChange("تم نقل قيادة الشبكة تلقائياً وبحث عن القائد الجديد...")
+                                  startClientDiscovery()
+                              }
+                              override fun onFailure(reason: Int) {
+                                  startClientDiscovery()
+                              }
+                          })
+                      }
+                  }
+
+                  private fun applyRoleNow() {
+                      if (shouldHostGroup) {
+                          startAutonomousHostGroup()
+                      } else {
+                          if (isGroupOwnerNow) {
+                              stepDownHostGroupNow()
+                          } else {
+                              startClientDiscovery()
+                          }
+                      }
+                  }
+
+                  private fun maintainAutoConnection() {
+                      val mgr = p2pManager ?: return
+                      val ch = channel ?: return
+
+                      mgr.requestGroupInfo(ch) { group ->
+                          if (group != null) {
+                              isConnectedNow = true
+                              isGroupOwnerNow = group.isGroupOwner
+                              groupSsid = group.networkName ?: ""
+                              groupPass = group.passphrase ?: ""
+                              if (group.isGroupOwner) {
+                                  groupOwnerIp = "192.168.49.1"
+                                  advertiseGroupCredentials(groupSsid, groupPass)
+                                  onStatusChange("شبكة القائد التلقائية جاهزة ($groupSsid)")
+                                  onTopologyChanged("192.168.49.1")
+                              } else {
+                                  onStatusChange("متصل تلقائياً بشبكة القائد ($groupSsid)")
+                                  onTopologyChanged(groupOwnerIp ?: "192.168.49.1")
+                              }
+                          } else {
+                              isConnectedNow = false
+                              isGroupOwnerNow = false
+                              if (shouldHostGroup) {
+                                  startAutonomousHostGroup()
+                              } else {
+                                  startClientDiscovery()
+                              }
+                          }
+                      }
+                  }
+
+                  private fun startAutonomousHostGroup() {
+                      val mgr = p2pManager ?: return
+                      val ch = channel ?: return
+
+                      mgr.requestGroupInfo(ch) { existing ->
+                          if (existing != null && existing.isGroupOwner) {
+                              isGroupOwnerNow = true
+                              isConnectedNow = true
+                              groupSsid = existing.networkName ?: ""
+                              groupPass = existing.passphrase ?: ""
+                              groupOwnerIp = "192.168.49.1"
+                              advertiseGroupCredentials(groupSsid, groupPass)
+                              onStatusChange("شبكة القائد التلقائية نشطة ($groupSsid)")
+                              onTopologyChanged("192.168.49.1")
+                              return@requestGroupInfo
+                          }
+
+                          onStatusChange("جاري إنشاء نقطة اتصال تلقائية للقائد...")
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                              val cfg = WifiP2pConfig.Builder()
+                                  .setNetworkName("DIRECT-BM-BIKEMIC")
+                                  .setPassphrase("bikemic1234")
+                                  .enablePersistentMode(true)
+                                  .setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ)
+                                  .build()
+                              mgr.createGroup(ch, cfg, object : WifiP2pManager.ActionListener {
+                                  override fun onSuccess() {
+                                      queryAndAdvertiseGroup()
+                                  }
+                                  override fun onFailure(reason: Int) {
+                                      createStandardGroupFallback()
+                                  }
+                              })
+                          } else {
+                              createStandardGroupFallback()
+                          }
+                      }
+                  }
+
+                  private fun createStandardGroupFallback() {
+                      val mgr = p2pManager ?: return
+                      val ch = channel ?: return
+                      mgr.createGroup(ch, object : WifiP2pManager.ActionListener {
+                          override fun onSuccess() {
+                              queryAndAdvertiseGroup()
+                          }
+                          override fun onFailure(reason: Int) {
+                              // Already in a group or busy; inspect group info
+                              queryAndAdvertiseGroup()
+                          }
+                      })
+                  }
+
+                  private fun queryAndAdvertiseGroup() {
+                      val mgr = p2pManager ?: return
+                      val ch = channel ?: return
+                      scope.launch {
+                          delay(500L)
+                          mgr.requestGroupInfo(ch) { group ->
+                              if (group != null) {
+                                  isGroupOwnerNow = group.isGroupOwner
+                                  isConnectedNow = true
+                                  groupSsid = group.networkName ?: "DIRECT-BM-BIKEMIC"
+                                  groupPass = group.passphrase ?: "bikemic1234"
+                                  groupOwnerIp = "192.168.49.1"
+                                  advertiseGroupCredentials(groupSsid, groupPass)
+                                  onStatusChange("تم تفعيل شبكة القائد تلقائياً ($groupSsid)")
+                                  onTopologyChanged("192.168.49.1")
+                              }
+                          }
+                      }
+                  }
+
+                  private fun advertiseGroupCredentials(ssid: String, pass: String) {
+                      if (ssid.isEmpty() || pass.isEmpty()) return
+                      val mgr = p2pManager ?: return
+                      val ch = channel ?: return
+                      runCatching {
+                          localServiceInfo?.let { mgr.removeLocalService(ch, it, null) }
+                          val record = mapOf(
+                              "ssid" to ssid,
+                              "pass" to pass,
+                              "goip" to "192.168.49.1"
+                          )
+                          val info = WifiP2pDnsSdServiceInfo.newInstance("_bikemic", "_udp", record)
+                          localServiceInfo = info
+                          mgr.addLocalService(ch, info, null)
+                          // Keep peer discovery active so followers can read the DNS-SD broadcast over Wi-Fi P2P
+                          mgr.discoverPeers(ch, null)
+                      }
+                  }
+
+                  private fun setupDnsSdDiscoveryListener() {
+                      val mgr = p2pManager ?: return
+                      val ch = channel ?: return
+
+                      val txtListener = WifiP2pManager.DnsSdTxtRecordListener { fullDomain, record, device ->
+                          if (!fullDomain.contains("_bikemic")) return@DnsSdTxtRecordListener
+                          if (shouldHostGroup || isConnectedNow) return@DnsSdTxtRecordListener
+
+                          val ssid = record["ssid"] ?: ""
+                          val pass = record["pass"] ?: ""
+                          val goIp = record["goip"] ?: "192.168.49.1"
+                          groupOwnerIp = goIp
+
+                          val now = System.currentTimeMillis()
+                          if (now - lastConnectAttemptMs < 7000L) return@DnsSdTxtRecordListener
+                          lastConnectAttemptMs = now
+
+                          onStatusChange("تم العثور على شبكة القائد ($ssid) • جاري الربط التلقائي...")
+                          connectToDiscoveredLeader(device, ssid, pass)
+                      }
+
+                      val servListener = WifiP2pManager.DnsSdServiceResponseListener { _, _, _ -> }
+                      mgr.setDnsSdResponseListeners(ch, servListener, txtListener)
+                  }
+
+                  private fun startClientDiscovery() {
+                      if (shouldHostGroup || isConnectedNow) return
+                      val mgr = p2pManager ?: return
+                      val ch = channel ?: return
+
+                      onStatusChange("البحث التلقائي عن شبكة القائد (بدون إعداد يدوي)...")
+
+                      // 1. On Android 10+ (API 29+), also try direct deterministic group connection if Leader uses Android 10+
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                          val now = System.currentTimeMillis()
+                          if (now - lastConnectAttemptMs > 8000L) {
+                              runCatching {
+                                  val cfg = WifiP2pConfig.Builder()
+                                      .setNetworkName("DIRECT-BM-BIKEMIC")
+                                      .setPassphrase("bikemic1234")
+                                      .build()
+                                  mgr.connect(ch, cfg, null)
+                              }
+                          }
+                      }
+
+                      // 2. Discover any DNS-SD service broadcasted by the Leader (works across all Android 8..14 devices)
+                      runCatching {
+                          mgr.clearServiceRequests(ch, object : WifiP2pManager.ActionListener {
+                              override fun onSuccess() {
+                                  val req = WifiP2pDnsSdServiceRequest.newInstance()
+                                  mgr.addServiceRequest(ch, req, object : WifiP2pManager.ActionListener {
+                                      override fun onSuccess() {
+                                          mgr.discoverServices(ch, null)
+                                      }
+                                      override fun onFailure(r: Int) {
+                                          mgr.discoverPeers(ch, null)
+                                      }
+                                  })
+                              }
+                              override fun onFailure(r: Int) {
+                                  mgr.discoverPeers(ch, null)
+                              }
+                          })
+                      }
+                  }
+
+                  private fun connectToDiscoveredLeader(device: WifiP2pDevice?, ssid: String, pass: String) {
+                      val mgr = p2pManager ?: return
+                      val ch = channel ?: return
+
+                      // Method A: Android 10+ seamless P2P group join with exact SSID & Passphrase (zero confirmation dialog!)
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && ssid.startsWith("DIRECT-") && pass.length >= 8) {
+                          val cfg = WifiP2pConfig.Builder()
+                              .setNetworkName(ssid)
+                              .setPassphrase(pass)
+                              .build()
+                          mgr.connect(ch, cfg, object : WifiP2pManager.ActionListener {
+                              override fun onSuccess() {
+                                  onStatusChange("تم الربط التلقائي بشبكة القائد ($ssid)")
+                                  onTopologyChanged("192.168.49.1")
+                              }
+                              override fun onFailure(reason: Int) {
+                                  connectViaP2pDeviceOrWifi(device, ssid, pass)
+                              }
+                          })
+                          return
+                      }
+
+                      connectViaP2pDeviceOrWifi(device, ssid, pass)
+                  }
+
+                  private fun connectViaP2pDeviceOrWifi(device: WifiP2pDevice?, ssid: String, pass: String) {
+                      val mgr = p2pManager
+                      val ch = channel
+
+                      // Method B: Connect via standard Wi-Fi P2P device address (Joining existing Group Owner requires no prompt on GO)
+                      if (mgr != null && ch != null && device != null && device.deviceAddress.isNotEmpty()) {
+                          val cfg = WifiP2pConfig().apply {
+                              deviceAddress = device.deviceAddress
+                              wps.setup = WpsInfo.PBC
+                              groupOwnerIntent = 0
+                          }
+                          mgr.connect(ch, cfg, object : WifiP2pManager.ActionListener {
+                              override fun onSuccess() {
+                                  onStatusChange("تم الاتصال التلقائي بالقائد (${device.deviceName})")
+                                  onTopologyChanged("192.168.49.1")
+                              }
+                              override fun onFailure(reason: Int) {
+                                  connectViaLegacyWifiOrSpecifier(ssid, pass)
+                              }
+                          })
+                          return
+                      }
+
+                      connectViaLegacyWifiOrSpecifier(ssid, pass)
+                  }
+
+                  @Suppress("DEPRECATION")
+                  private fun connectViaLegacyWifiOrSpecifier(ssid: String, pass: String) {
+                      if (ssid.isEmpty() || pass.isEmpty()) return
+                      runCatching {
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                              val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                              activeNetCallback?.let { runCatching { cm.unregisterNetworkCallback(it) } }
+                              val spec = WifiNetworkSpecifier.Builder()
+                                  .setSsid(ssid)
+                                  .setWpa2Passphrase(pass)
+                                  .build()
+                              val req = NetworkRequest.Builder()
+                                  .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                                  .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                                  .setNetworkSpecifier(spec)
+                                  .build()
+                              val cb = object : ConnectivityManager.NetworkCallback() {
+                                  override fun onAvailable(network: Network) {
+                                      cm.bindProcessToNetwork(network)
+                                      isConnectedNow = true
+                                      groupOwnerIp = "192.168.49.1"
+                                      onStatusChange("متصل تلقائياً بشبكة القائد ($ssid)")
+                                      onTopologyChanged("192.168.49.1")
+                                  }
+                              }
+                              activeNetCallback = cb
+                              cm.requestNetwork(req, cb)
+                          } else {
+                              val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                              val conf = WifiConfiguration().apply {
+                                  SSID = "\"$ssid\""
+                                  preSharedKey = "\"$pass\""
+                              }
+                              val netId = wifi.addNetwork(conf)
+                              if (netId != -1) {
+                                  wifi.disconnect()
+                                  wifi.enableNetwork(netId, true)
+                                  wifi.reconnect()
+                                  onStatusChange("تم الربط التلقائي بوايفاي القائد ($ssid)")
+                                  onTopologyChanged("192.168.49.1")
+                              }
+                          }
+                      }
+                  }
+
+                  private fun registerP2pReceiver() {
+                      val filter = IntentFilter().apply {
+                          addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
+                          addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
+                          addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
+                      }
+                      receiver = object : BroadcastReceiver() {
+                          override fun onReceive(ctx: Context?, intent: Intent?) {
+                              val act = intent?.action ?: return
+                              val mgr = p2pManager ?: return
+                              val ch = channel ?: return
+
+                              when (act) {
+                                  WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
+                                      mgr.requestConnectionInfo(ch) { info: WifiP2pInfo? ->
+                                          if (info != null && info.groupFormed) {
+                                              isConnectedNow = true
+                                              isGroupOwnerNow = info.isGroupOwner
+                                              val goIp = info.groupOwnerAddress?.hostAddress ?: "192.168.49.1"
+                                              groupOwnerIp = goIp
+                                              onTopologyChanged(goIp)
+                                              mgr.requestGroupInfo(ch) { grp ->
+                                                  if (grp != null) {
+                                                      groupSsid = grp.networkName ?: ""
+                                                      groupPass = grp.passphrase ?: ""
+                                                      if (grp.isGroupOwner) {
+                                                          advertiseGroupCredentials(groupSsid, groupPass)
+                                                      }
+                                                  }
+                                              }
+                                          } else {
+                                              isConnectedNow = false
+                                              isGroupOwnerNow = false
+                                          }
+                                      }
+                                  }
+                                  WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
+                                      if (!shouldHostGroup && !isConnectedNow) {
+                                          mgr.requestPeers(ch) { peers ->
+                                              val goCandidate = peers.deviceList.firstOrNull { dev ->
+                                                  dev.isGroupOwner || dev.deviceName.contains("BikeMic", ignoreCase = true)
+                                              }
+                                              if (goCandidate != null) {
+                                                  val now = System.currentTimeMillis()
+                                                  if (now - lastConnectAttemptMs > 7000L) {
+                                                      lastConnectAttemptMs = now
+                                                      connectViaP2pDeviceOrWifi(goCandidate, "", "")
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                      context.registerReceiver(receiver, filter)
+                  }
+
+                  fun stop() {
+                      scope.cancel()
+                      val mgr = p2pManager
+                      val ch = channel
+                      runCatching {
+                          if (mgr != null && ch != null) {
+                              localServiceInfo?.let { mgr.removeLocalService(ch, it, null) }
+                              mgr.clearServiceRequests(ch, null)
+                              mgr.removeGroup(ch, null)
+                          }
+                      }
+                      runCatching { receiver?.let { context.unregisterReceiver(it) } }
+                      runCatching {
+                          val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                          activeNetCallback?.let { cm.unregisterNetworkCallback(it) }
+                      }
+                  }
+              }
+          """)
+
+          # =========================================================
+          # 8. MeshVoiceEngine.kt
+          #    - Integrates AutoMeshHotspotManager (zero-touch automatic Hotspot/Wi-Fi Direct connection)
+          #    - Automatic Leader & Hotspot Group handover when battery <= 3%
+          #    - Little-Endian G.711 u-law 8-bit ultra-lightweight audio (320 bytes/frame = 20ms)
+          #    - Full Mesh Gossip so ALL riders see all connected names
+          #    - Instant PTT Burst Delivery Confirmation (ACKs with Rider names + Sound/Vibration)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/MeshVoiceEngine.kt", r"""
               package com.bikemic.app
@@ -558,12 +1008,19 @@ jobs:
               import android.media.AudioRecord
               import android.media.AudioTrack
               import android.media.MediaRecorder
+              import android.media.ToneGenerator
               import android.media.audiofx.AcousticEchoCanceler
+              import android.media.audiofx.AutomaticGainControl
               import android.media.audiofx.NoiseSuppressor
               import android.net.ConnectivityManager
               import android.net.wifi.WifiManager
+              import android.os.Build
+              import android.os.PowerManager
+              import android.os.VibrationEffect
+              import android.os.Vibrator
               import androidx.compose.runtime.mutableIntStateOf
               import androidx.compose.runtime.mutableLongStateOf
+              import androidx.compose.runtime.mutableStateListOf
               import androidx.compose.runtime.mutableStateOf
               import kotlinx.coroutines.*
               import org.json.JSONArray
@@ -577,9 +1034,9 @@ jobs:
               import java.net.MulticastSocket
               import java.net.NetworkInterface
               import java.nio.ByteBuffer
+              import java.nio.ByteOrder
               import java.util.Collections
               import java.util.concurrent.ConcurrentHashMap
-              import java.util.concurrent.ConcurrentLinkedQueue
               import java.util.concurrent.atomic.AtomicInteger
               import kotlin.random.Random
 
@@ -590,34 +1047,45 @@ jobs:
                       private const val AUDIO_PORT = 50005
                       private const val MULTICAST_GROUP = "239.255.42.99"
                       private const val SAMPLE_RATE = 16000
-                      // إطار أكبر = صوت أوضح وأقل تشويشاً (40 مللي ثانية)
-                      private const val FRAME_BYTES = 1280
-                      private const val MAGIC_AUDIO: Byte = 0x42
-                      private const val MAGIC_ACK: Byte = 0x43
-                      private const val HEADER_SIZE = 15
-                      private const val MAX_JITTER_FRAMES = 8
+                      private const val SAMPLES_PER_FRAME = 320
+                      private const val MAGIC_AUDIO_ULAW: Byte = 0x43
+                      private const val HEADER_SIZE = 20
                   }
 
                   val selfId: Long = Random.nextLong(100_000L, Long.MAX_VALUE)
                   @Volatile var userName: String = "أبو ناصر"
                   @Volatile var chainRank: Int = 1
-                  @Volatile var isPttPressed: Boolean = false
                   @Volatile var isOpenMicOn: Boolean = false
                   @Volatile var selectAllPeers: Boolean = true
                   val allowedPeerIds: MutableSet<Long> = Collections.newSetFromMap(ConcurrentHashMap())
+
+                  @Volatile private var pttActiveInternal: Boolean = false
+                  @Volatile private var currentBurstId: Int = 0
+                  private val burstCounter = AtomicInteger(Random.nextInt(100, 999999))
 
                   @Volatile var batteryPct: Int = 100
                   @Volatile var isCharging: Boolean = false
                   @Volatile var thermalStatus: Int = 0
 
+                  val peersListState = mutableStateListOf<PeerInfo>()
                   val peersVersion = mutableIntStateOf(0)
                   val connectedCount = mutableIntStateOf(0)
                   val currentHostIdState = mutableLongStateOf(selfId)
                   val currentEpochState = mutableLongStateOf(0L)
-                  val statusText = mutableStateOf("جارٍ البحث عن دراجين على الشبكة...")
+                  val statusText = mutableStateOf("جاري التجهيز والربط التلقائي...")
+                  val autoNetBanner = mutableStateOf("تفعيل الشبكة التلقائية...")
                   val activeSpeakerName = mutableStateOf<String?>(null)
                   val leaderChangeEvent = mutableStateOf<String?>(null)
-                  val ackReceivedEvent = mutableStateOf<String?>(null)
+
+                  // PTT Telegram ACK tracking
+                  val ackedPeerNames = mutableStateListOf<String>()
+                  val lastAckSummary = mutableStateOf<String?>(null)
+                  private val ackedPeerIdsForBurst = Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
+                  private val receivedBurstsAcked = Collections.synchronizedMap(
+                      object : LinkedHashMap<Long, Long>(256, 0.75f, true) {
+                          override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Long>?) = size > 200
+                      }
+                  )
 
                   val debugSentCount = mutableIntStateOf(0)
                   val debugReceivedCount = mutableIntStateOf(0)
@@ -630,30 +1098,114 @@ jobs:
                   private val knownHintIps = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
                   private val seenAudio = Collections.synchronizedMap(
-                      object : LinkedHashMap<Long, Boolean>(1024, 0.75f, true) {
-                          override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Boolean>?) = size > 1200
+                      object : LinkedHashMap<Long, Boolean>(2048, 0.75f, true) {
+                          override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Boolean>?) = size > 1600
+                      }
+                  )
+                  private val seenCtrlMsg = Collections.synchronizedMap(
+                      object : LinkedHashMap<Long, Boolean>(512, 0.75f, true) {
+                          override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Boolean>?) = size > 400
                       }
                   )
 
-                  // مخزن اهتزاز بسيط للصوت الوارد
-                  private val jitterQueue = ConcurrentLinkedQueue<ByteArray>()
-                  @Volatile private var lastPlayedSpeakerId: Long = -1L
-
                   private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+                  private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
                   private val seqCounter = AtomicInteger(1)
 
-                  private val election = LeaderElection(selfId)
+                  // minBattery = 3 -> Leader hands over leadership & Hotspot automatically if battery <= 3%
+                  private val election = LeaderElection(selfId, minBattery = 3)
+                  private var autoHotspot: AutoMeshHotspotManager? = null
                   private var multicastLock: WifiManager.MulticastLock? = null
                   private var wifiLock: WifiManager.WifiLock? = null
+                  private var cpuWakeLock: PowerManager.WakeLock? = null
+                  private var toneGen: ToneGenerator? = null
 
                   @Volatile private var discoverySocket: DatagramSocket? = null
                   @Volatile private var multicastSocket: MulticastSocket? = null
                   @Volatile private var audioSocket: DatagramSocket? = null
 
-                  // لتتبع الإقرارات
-                  private val pendingAcks = ConcurrentHashMap<Int, Long>() // seq -> timestamp
+                  private val ulawToLinearTable = ShortArray(256) { idx ->
+                      val u = idx.inv() and 0xFF
+                      val sign = u and 0x80
+                      val exponent = (u shr 4) and 0x07
+                      val mantissa = u and 0x0F
+                      var sample = ((mantissa shl 3) + 0x84) shl exponent
+                      sample -= 0x84
+                      (if (sign != 0) -sample else sample).coerceIn(-32768, 32767).toShort()
+                  }
+
+                  private fun linearToUlaw(sampleIn: Int): Byte {
+                      val BIAS = 0x84
+                      val CLIP = 32635
+                      var sample = sampleIn
+                      val sign = if (sample < 0) {
+                          sample = -sample
+                          0x80
+                      } else {
+                          0x00
+                      }
+                      if (sample > CLIP) sample = CLIP
+                      sample += BIAS
+                      var exponent = 7
+                      var expMask = 0x4000
+                      while (exponent > 0 && (sample and expMask) == 0) {
+                          exponent--
+                          expMask = expMask shr 1
+                      }
+                      val mantissa = (sample shr (exponent + 3)) and 0x0F
+                      val ulawByte = (sign or (exponent shl 4) or mantissa).inv()
+                      return ulawByte.toByte()
+                  }
+
+                  fun setPttPressed(pressed: Boolean) {
+                      if (pressed && !pttActiveInternal) {
+                          val bId = burstCounter.incrementAndGet()
+                          currentBurstId = bId
+                          ackedPeerIdsForBurst.clear()
+                          mainScope.launch {
+                              ackedPeerNames.clear()
+                              lastAckSummary.value = "جاري إرسال البرقية..."
+                          }
+                          pttActiveInternal = true
+                          playShortBeep(ToneGenerator.TONE_PROP_BEEP, 45)
+                      } else if (!pressed && pttActiveInternal) {
+                          val finishedBurstId = currentBurstId
+                          pttActiveInternal = false
+                          scope.launch {
+                              sendBurstEndSignal(finishedBurstId)
+                          }
+                      }
+                  }
+
+                  private fun playShortBeep(tone: Int, durationMs: Int) {
+                      runCatching {
+                          if (toneGen == null) {
+                              toneGen = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 75)
+                          }
+                          toneGen?.startTone(tone, durationMs)
+                      }
+                  }
+
+                  private fun vibrateConfirmation() {
+                      runCatching {
+                          val vib = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                              vib.vibrate(VibrationEffect.createOneShot(65L, VibrationEffect.DEFAULT_AMPLITUDE))
+                          } else {
+                              @Suppress("DEPRECATION")
+                              vib.vibrate(65L)
+                          }
+                      }
+                  }
 
                   fun start() {
+                      runCatching {
+                          val pm = context.applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+                          cpuWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BikeMic::CpuWakeLock").apply {
+                              setReferenceCounted(false)
+                              acquire()
+                          }
+                      }
                       runCatching {
                           val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                           multicastLock = wifi.createMulticastLock("BikeMicMulticast").apply {
@@ -670,8 +1222,29 @@ jobs:
                           val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
                           am.mode = AudioManager.MODE_IN_COMMUNICATION
                           am.isSpeakerphoneOn = true
-                          am.setStreamVolume(AudioManager.STREAM_VOICE_CALL,
-                              am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL), 0)
+                      }
+
+                      // Always include standard Wi-Fi Direct Group Owner IP (192.168.49.1) in hint targets
+                      knownHintIps.add("192.168.49.1")
+
+                      // Start Zero-Touch Auto-Hotspot / Auto-Discovery Manager
+                      val shouldStartAsHost = (chainRank == 1) && (batteryPct > 3 || isCharging)
+                      if (shouldStartAsHost) {
+                          val (h, ep) = election.declareSelfAsHost()
+                          currentHostIdState.longValue = h
+                          currentEpochState.longValue = ep
+                      }
+                      autoHotspot = AutoMeshHotspotManager(
+                          context = context,
+                          onStatusChange = { msg ->
+                              mainScope.launch { autoNetBanner.value = msg }
+                          },
+                          onTopologyChanged = { goIp ->
+                              if (!goIp.isNullOrEmpty()) knownHintIps.add(goIp)
+                              scope.launch { sendHeartbeatNow() }
+                          }
+                      ).also {
+                          it.start(initialShouldHost = shouldStartAsHost)
                       }
 
                       scope.launch {
@@ -689,17 +1262,31 @@ jobs:
 
                   fun stop() {
                       scope.cancel()
+                      mainScope.cancel()
+                      runCatching { autoHotspot?.stop() }
                       runCatching { discoverySocket?.close() }
                       runCatching { multicastSocket?.close() }
                       runCatching { audioSocket?.close() }
+                      runCatching { toneGen?.release() }
                       runCatching { if (multicastLock?.isHeld == true) multicastLock?.release() }
                       runCatching { if (wifiLock?.isHeld == true) wifiLock?.release() }
+                      runCatching { if (cpuWakeLock?.isHeld == true) cpuWakeLock?.release() }
                   }
 
                   fun updateUser(newName: String, newRank: Int) {
+                      val oldRank = chainRank
                       userName = newName
                       chainRank = newRank
-                      peersVersion.intValue += 1
+                      if (oldRank != newRank) {
+                          val shouldBeHost = (newRank == 1 && (batteryPct > 3 || isCharging))
+                          if (shouldBeHost) {
+                              val (h, ep) = election.declareSelfAsHost()
+                              currentHostIdState.longValue = h
+                              currentEpochState.longValue = ep
+                          }
+                          autoHotspot?.setRole(shouldBeHost)
+                      }
+                      syncPeersToCompose()
                       scope.launch { sendHeartbeatNow() }
                   }
 
@@ -707,11 +1294,15 @@ jobs:
                       batteryPct = bat
                       isCharging = chg
                       thermalStatus = thermal
-                      peersVersion.intValue += 1
+                      syncPeersToCompose()
                   }
 
                   fun getDebugInterfaces(): List<Pair<String, String>> = cachedIfacesInfo
+
                   fun getDebugBroadcasts(): List<String> = cachedTargetIps.mapNotNull { it.hostAddress }.sorted()
+
+                  fun getAutoHotspotCredentials(): Pair<String, String> =
+                      (autoHotspot?.groupSsid ?: "") to (autoHotspot?.groupPass ?: "")
 
                   private fun isIgnoredInterface(name: String): Boolean {
                       val n = name.lowercase()
@@ -777,6 +1368,13 @@ jobs:
                           }
                       }
 
+                      // Always add standard Wi-Fi Direct Group Owner IP & Broadcast (192.168.49.1 / 192.168.49.255)
+                      if ("192.168.49.1" !in localIps) {
+                          runCatching { targets.add(InetAddress.getByName("192.168.49.1")) }
+                      }
+                      runCatching { targets.add(InetAddress.getByName("192.168.49.255")) }
+
+                      // Read Hotspot/Router Gateway IP from ConnectivityManager
                       runCatching {
                           val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                           for (net in cm.allNetworks) {
@@ -793,6 +1391,7 @@ jobs:
                           }
                       }
 
+                      // Read WiFi DHCP Gateway fallback
                       runCatching {
                           val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                           @Suppress("DEPRECATION")
@@ -810,6 +1409,7 @@ jobs:
                           }
                       }
 
+                      // Read ARP neighbors
                       runCatching {
                           val arpFile = File("/proc/net/arp")
                           if (arpFile.canRead()) {
@@ -891,10 +1491,11 @@ jobs:
                       }
                   }
 
-                  private fun sendToAllDiscoveryTargets(obj: JSONObject) {
+                  private fun sendToAllDiscoveryTargets(obj: JSONObject, excludeIp: String? = null) {
                       val sock = discoverySocket ?: return
                       val data = obj.toString().toByteArray(Charsets.UTF_8)
                       for (target in cachedTargetIps) {
+                          if (excludeIp != null && target.hostAddress == excludeIp) continue
                           runCatching {
                               sock.send(DatagramPacket(data, data.size, target, DISCOVERY_PORT))
                               debugSentCount.intValue += 1
@@ -903,14 +1504,21 @@ jobs:
                   }
 
                   private fun buildSelfHeartbeatJson(type: String = "HB"): JSONObject {
+                      val now = System.currentTimeMillis()
                       val peersArr = JSONArray()
                       peersMap.values.forEach { p ->
-                          if (p.ipAddress.isNotEmpty()) {
+                          if (now - p.lastSeenMs < 9000L && p.ipAddress.isNotEmpty()) {
                               peersArr.put(JSONObject().apply {
                                   put("id", p.nodeId)
                                   put("ip", p.ipAddress)
                                   put("name", p.name)
                                   put("rank", p.chainRank)
+                                  put("bat", p.batteryPct)
+                                  put("chg", p.isCharging)
+                                  put("thm", p.thermalStatus)
+                                  put("epoch", p.epoch)
+                                  put("host", p.currentHostId)
+                                  put("age", (now - p.lastSeenMs).coerceAtLeast(0L))
                               })
                           }
                       }
@@ -933,9 +1541,42 @@ jobs:
                       sendToAllDiscoveryTargets(buildSelfHeartbeatJson("HB"))
                   }
 
+                  private fun sendBurstEndSignal(burstId: Int) {
+                      if (burstId <= 0) return
+                      val pkt = JSONObject().apply {
+                          put("t", "BURST_END")
+                          put("id", selfId)
+                          put("name", userName)
+                          put("rank", chainRank)
+                          put("burstId", burstId)
+                          put("msgId", Random.nextLong(1L, Long.MAX_VALUE))
+                          put("ttl", 2)
+                      }
+                      repeat(2) {
+                          sendToAllDiscoveryTargets(pkt)
+                      }
+                  }
+
+                  private fun sendBurstAck(targetSenderId: Long, burstId: Int, replyAddr: InetAddress?) {
+                      val ackObj = JSONObject().apply {
+                          put("t", "BURST_ACK")
+                          put("id", selfId)
+                          put("name", userName)
+                          put("rank", chainRank)
+                          put("targetId", targetSenderId)
+                          put("burstId", burstId)
+                          put("msgId", Random.nextLong(1L, Long.MAX_VALUE))
+                          put("ttl", 2)
+                      }
+                      if (replyAddr != null) {
+                          sendUnicastJson(ackObj, replyAddr)
+                      }
+                      sendToAllDiscoveryTargets(ackObj)
+                  }
+
                   private fun startDiscoveryReceiver() {
                       scope.launch {
-                          val buf = ByteArray(4096)
+                          val buf = ByteArray(8192)
                           while (isActive) {
                               try {
                                   val pkt = DatagramPacket(buf, buf.size)
@@ -951,14 +1592,14 @@ jobs:
                   private fun startMulticastReceiver() {
                       val ms = multicastSocket ?: return
                       scope.launch {
-                          val buf = ByteArray(4096)
+                          val buf = ByteArray(8192)
                           while (isActive) {
                               try {
                                   val pkt = DatagramPacket(buf, buf.size)
                                   ms.receive(pkt)
                                   handleDiscoveryPacket(pkt)
                               } catch (e: Exception) {
-                                  if (isActive) delay(200)
+                                  if (isActive) delay(250)
                               }
                           }
                       }
@@ -972,6 +1613,7 @@ jobs:
                           if (senderId <= 0L || senderId == selfId) return
 
                           debugReceivedCount.intValue += 1
+                          val now = System.currentTimeMillis()
 
                           val senderIp = pkt.address.hostAddress ?: ""
                           if (senderIp.isNotEmpty() && senderIp !in cachedLocalIps) {
@@ -984,16 +1626,17 @@ jobs:
                                   val existed = peersMap[senderId]
                                   val peer = PeerInfo(
                                       nodeId = senderId,
-                                      name = msg.optString("name", existed?.name ?: "راكب"),
+                                      name = msg.optString("name", existed?.name ?: "راكب").ifBlank { "راكب" },
                                       chainRank = msg.optInt("rank", existed?.chainRank ?: 2),
                                       batteryPct = msg.optInt("bat", existed?.batteryPct ?: 100),
                                       isCharging = msg.optBoolean("chg", existed?.isCharging ?: false),
                                       thermalStatus = msg.optInt("thm", existed?.thermalStatus ?: 0),
                                       epoch = msg.optLong("epoch", existed?.epoch ?: 0L),
                                       currentHostId = msg.optLong("host", senderId),
-                                      ipAddress = senderIp,
-                                      lastSeenMs = System.currentTimeMillis(),
-                                      handshakeOk = true
+                                      ipAddress = senderIp.ifEmpty { existed?.ipAddress ?: "" },
+                                      lastSeenMs = now,
+                                      handshakeOk = true,
+                                      isDirect = true
                                   )
                                   peersMap[senderId] = peer
                                   if (selectAllPeers) allowedPeerIds.add(senderId)
@@ -1003,16 +1646,49 @@ jobs:
                                   if (remoteHost > 0L && election.acceptHostAnnouncement(remoteHost, remoteEpoch)) {
                                       currentHostIdState.longValue = election.currentHostId
                                       currentEpochState.longValue = election.currentEpoch
+                                      autoHotspot?.setRole(election.currentHostId == selfId)
                                   }
 
+                                  // Full Mesh Gossip table
                                   val gossipArr = msg.optJSONArray("peers")
                                   if (gossipArr != null) {
                                       for (i in 0 until gossipArr.length()) {
                                           val gp = gossipArr.optJSONObject(i) ?: continue
                                           val gId = gp.optLong("id", -1L)
+                                          if (gId <= 0L || gId == selfId) continue
                                           val gIp = gp.optString("ip", "")
-                                          if (gId > 0L && gId != selfId && gIp.isNotEmpty() && gIp !in cachedLocalIps) {
-                                              if (knownHintIps.add(gIp) || !peersMap.containsKey(gId)) {
+                                          val gName = gp.optString("name", "راكب").ifBlank { "راكب" }
+                                          val gRank = gp.optInt("rank", 2)
+                                          val gBat = gp.optInt("bat", 100)
+                                          val gChg = gp.optBoolean("chg", false)
+                                          val gThm = gp.optInt("thm", 0)
+                                          val gEpoch = gp.optLong("epoch", 0L)
+                                          val gHost = gp.optLong("host", gId)
+                                          val gAge = gp.optLong("age", 0L).coerceIn(0L, 8000L)
+                                          val inferredSeen = now - gAge
+
+                                          val currentEntry = peersMap[gId]
+                                          if (currentEntry == null || (inferredSeen > currentEntry.lastSeenMs + 1500L)) {
+                                              val resolvedIp = if (gIp.isNotEmpty() && gIp !in cachedLocalIps) gIp else (currentEntry?.ipAddress ?: senderIp)
+                                              peersMap[gId] = PeerInfo(
+                                                  nodeId = gId,
+                                                  name = gName,
+                                                  chainRank = gRank,
+                                                  batteryPct = gBat,
+                                                  isCharging = gChg,
+                                                  thermalStatus = gThm,
+                                                  epoch = gEpoch,
+                                                  currentHostId = gHost,
+                                                  ipAddress = resolvedIp,
+                                                  lastSeenMs = maxOf(currentEntry?.lastSeenMs ?: 0L, inferredSeen),
+                                                  handshakeOk = true,
+                                                  isDirect = currentEntry?.isDirect ?: false
+                                              )
+                                              if (selectAllPeers) allowedPeerIds.add(gId)
+                                          }
+
+                                          if (gIp.isNotEmpty() && gIp !in cachedLocalIps) {
+                                              if (knownHintIps.add(gIp) || currentEntry == null) {
                                                   runCatching {
                                                       sendUnicastJson(buildSelfHeartbeatJson("HB"), InetAddress.getByName(gIp))
                                                   }
@@ -1025,12 +1701,60 @@ jobs:
                                       sendUnicastJson(buildSelfHeartbeatJson("DIRECT_ACK"), pkt.address)
                                   }
 
-                                  updateUiCounters()
+                                  syncPeersToCompose()
+                              }
+                              "BURST_END" -> {
+                                  val msgId = msg.optLong("msgId", 0L)
+                                  if (msgId != 0L && seenCtrlMsg.put(msgId, true) != null) return
+                                  val burstId = msg.optInt("burstId", 0)
+                                  if (burstId > 0) {
+                                      val key = (senderId shl 20) xor burstId.toLong()
+                                      if (receivedBurstsAcked.put(key, now) == null) {
+                                          sendBurstAck(senderId, burstId, pkt.address)
+                                      }
+                                  }
+                                  val ttl = msg.optInt("ttl", 0)
+                                  if (ttl > 0 && peersMap.size > 1) {
+                                      msg.put("ttl", ttl - 1)
+                                      sendToAllDiscoveryTargets(msg, excludeIp = senderIp)
+                                  }
+                              }
+                              "BURST_ACK" -> {
+                                  val msgId = msg.optLong("msgId", 0L)
+                                  if (msgId != 0L && seenCtrlMsg.put(msgId, true) != null) return
+                                  val targetId = msg.optLong("targetId", -1L)
+                                  val burstId = msg.optInt("burstId", 0)
+                                  val ackerName = msg.optString("name", peersMap[senderId]?.name ?: "راكب")
+                                  val ackerRank = msg.optInt("rank", peersMap[senderId]?.chainRank ?: 2)
+
+                                  if (targetId == selfId && burstId == currentBurstId && burstId > 0) {
+                                      if (ackedPeerIdsForBurst.add(senderId)) {
+                                          val label = "$ackerName (#$ackerRank)"
+                                          mainScope.launch {
+                                              if (!ackedPeerNames.contains(label)) {
+                                                  ackedPeerNames.add(label)
+                                              }
+                                              lastAckSummary.value = "✓ وصلت البرقية إلى (${ackedPeerNames.size}): ${ackedPeerNames.joinToString("، ")}"
+                                          }
+                                          playShortBeep(ToneGenerator.TONE_PROP_ACK, 70)
+                                          vibrateConfirmation()
+                                      }
+                                  } else {
+                                      val ttl = msg.optInt("ttl", 0)
+                                      if (ttl > 0 && peersMap.size > 1) {
+                                          msg.put("ttl", ttl - 1)
+                                          sendToAllDiscoveryTargets(msg, excludeIp = senderIp)
+                                      }
+                                  }
                               }
                               "STEP_DOWN" -> {
                                   val epoch = msg.optLong("epoch", 0L)
+                                  val nextHostId = msg.optLong("nextHostId", -1L)
                                   if (epoch >= election.currentEpoch) {
-                                      statusText.value = "القائد السابق يتنازل... جارٍ انتخاب قائد جديد"
+                                      statusText.value = "بطارية القائد أقل من 3%... جاري استلام القيادة تلقائياً"
+                                      if (nextHostId == selfId) {
+                                          promoteSelfToLeaderAndHost(minEpoch = epoch)
+                                      }
                                   }
                               }
                               "I_AM_HOST" -> {
@@ -1039,17 +1763,10 @@ jobs:
                                   if (newHost > 0L && election.acceptHostAnnouncement(newHost, epoch)) {
                                       currentHostIdState.longValue = election.currentHostId
                                       currentEpochState.longValue = election.currentEpoch
+                                      autoHotspot?.setRole(newHost == selfId)
                                       val hostName = if (newHost == selfId) userName else (peersMap[newHost]?.name ?: "راكب")
                                       leaderChangeEvent.value = "القائد الجديد: $hostName"
                                       statusText.value = "متصل • القائد: $hostName"
-                                  }
-                              }
-                              "ACK" -> {
-                                  val fromName = msg.optString("name", "راكب")
-                                  val seq = msg.optInt("seq", -1)
-                                  if (seq > 0) {
-                                      pendingAcks.remove(seq)
-                                      ackReceivedEvent.value = "تم الاستلام من $fromName"
                                   }
                               }
                           }
@@ -1058,16 +1775,40 @@ jobs:
                       }
                   }
 
-                  private fun updateUiCounters() {
-                      val live = peersMap.values.count { it.handshakeOk }
+                  private fun promoteSelfToLeaderAndHost(minEpoch: Long = election.currentEpoch) {
+                      val (newHost, newEpoch) = election.declareSelfAsHost(minEpoch)
+                      currentHostIdState.longValue = newHost
+                      currentEpochState.longValue = newEpoch
+                      autoHotspot?.setRole(true)
+                      val announce = JSONObject().apply {
+                          put("t", "I_AM_HOST")
+                          put("id", newHost)
+                          put("epoch", newEpoch)
+                      }
+                      repeat(3) {
+                          sendToAllDiscoveryTargets(announce)
+                      }
+                      leaderChangeEvent.value = "أصبحت أنت قائد السلسلة (تم تفعيل نقطة الاتصال تلقائياً)"
+                  }
+
+                  private fun syncPeersToCompose() {
+                      val sorted = peersMap.values.filter { it.handshakeOk }
+                          .sortedWith(compareBy<PeerInfo> { it.chainRank }.thenBy { it.name })
+                      val live = sorted.size
                       connectedCount.intValue = live
                       peersVersion.intValue += 1
+
+                      mainScope.launch {
+                          peersListState.clear()
+                          peersListState.addAll(sorted)
+                      }
+
                       if (live > 0) {
                           val hostId = election.currentHostId
-                          val hostName = if (hostId == selfId) "أنت" else (peersMap[hostId]?.name ?: "راكب")
-                          statusText.value = "متصل ($live) • القائد: $hostName"
+                          val hostName = if (hostId == selfId) "أنت ($userName)" else (peersMap[hostId]?.name ?: "راكب")
+                          statusText.value = "متصل تلقائياً ($live) • القائد: $hostName"
                       } else {
-                          statusText.value = "جارٍ البحث... (اتصل بنفس الهوتسبوت أو الراوتر)"
+                          statusText.value = "الربط التلقائي يعمل... افتح التطبيق في الهواتف الأخرى"
                       }
                   }
 
@@ -1077,11 +1818,11 @@ jobs:
                               runCatching {
                                   sendHeartbeatNow()
                                   val now = System.currentTimeMillis()
-                                  val dead = peersMap.filterValues { now - it.lastSeenMs > 9000L }.keys
+                                  val dead = peersMap.filterValues { now - it.lastSeenMs > 9500L }.keys
                                   if (dead.isNotEmpty()) {
                                       dead.forEach { peersMap.remove(it) }
                                   }
-                                  updateUiCounters()
+                                  syncPeersToCompose()
                               }.onFailure {
                                   debugLastError.value = "HB: ${it.message}"
                               }
@@ -1100,31 +1841,43 @@ jobs:
                               val currentHost = election.currentHostId
                               val hostMissing = currentHost != selfId && !peersMap.containsKey(currentHost)
 
-                              if (peersMap.isNotEmpty() && election.currentEpoch == 0L && chainRank == 1 && currentHost != selfId) {
-                                  val (newHost, newEpoch) = election.declareSelfAsHost()
-                                  currentHostIdState.longValue = newHost
-                                  currentEpochState.longValue = newEpoch
-                                  val announce = JSONObject().apply {
-                                      put("t", "I_AM_HOST")
-                                      put("id", newHost)
-                                      put("epoch", newEpoch)
-                                  }
-                                  sendToAllDiscoveryTargets(announce)
+                              if (peersMap.isNotEmpty() && election.currentEpoch == 0L && chainRank == 1 && (batteryPct > 3 || isCharging) && currentHost != selfId) {
+                                  promoteSelfToLeaderAndHost()
                               }
 
+                              // Check if Leader battery is <= 3% (or severe thermal) -> Hand over to next rider immediately!
                               if (currentHost == selfId && election.shouldStepDown(batteryPct, isCharging, thermalStatus, now)) {
-                                  if (electionTriggerMs == 0L) {
-                                      val reason = if (thermalStatus >= DeviceHealthMonitor.THERMAL_SEVERE) "حرارة مرتفعة" else "بطارية منخفضة"
+                                  if (electionTriggerMs == 0L && peersMap.isNotEmpty()) {
+                                      val selfPeer = PeerInfo(
+                                          nodeId = selfId, name = userName, chainRank = chainRank,
+                                          batteryPct = batteryPct, isCharging = isCharging,
+                                          thermalStatus = thermalStatus, epoch = election.currentEpoch,
+                                          currentHostId = election.currentHostId, ipAddress = "",
+                                          lastSeenMs = now, handshakeOk = true
+                                      )
+                                      val nextWinner = election.pickBestLeader(selfPeer, peersMap.values, excludeId = selfId)
+                                      val reason = if (batteryPct <= 3) "البطارية أقل من 3%" else "حرارة مرتفعة"
                                       val sd = JSONObject().apply {
                                           put("t", "STEP_DOWN")
                                           put("id", selfId)
                                           put("epoch", election.currentEpoch)
+                                          put("nextHostId", nextWinner?.nodeId ?: -1L)
                                           put("reason", reason)
                                       }
-                                      sendToAllDiscoveryTargets(sd)
+                                      repeat(3) {
+                                          sendToAllDiscoveryTargets(sd)
+                                      }
+                                      if (nextWinner != null) {
+                                          election.acceptHostAnnouncement(nextWinner.nodeId, election.currentEpoch + 1L)
+                                          currentHostIdState.longValue = election.currentHostId
+                                          currentEpochState.longValue = election.currentEpoch
+                                      }
+                                      // Shut down our Hotspot Group so the new Leader takes over seamlessly
+                                      autoHotspot?.stepDownHostGroupNow()
                                       stepDownOriginId = selfId
                                       electionTriggerMs = now
-                                      statusText.value = "تنازلت عن القيادة ($reason)..."
+                                      leaderChangeEvent.value = "انتقلت القيادة إلى ${nextWinner?.name ?: "الدراج التالي"} لأن بطاريتك ≤ 3%"
+                                      statusText.value = "تم تسليم القيادة ($reason)"
                                   }
                               } else if (hostMissing && peersMap.isNotEmpty()) {
                                   if (electionTriggerMs == 0L) {
@@ -1133,7 +1886,7 @@ jobs:
                                   }
                               }
 
-                              if (electionTriggerMs > 0L && now - electionTriggerMs > 2000L) {
+                              if (electionTriggerMs > 0L && now - electionTriggerMs > 1500L) {
                                   val selfPeer = PeerInfo(
                                       nodeId = selfId, name = userName, chainRank = chainRank,
                                       batteryPct = batteryPct, isCharging = isCharging,
@@ -1143,16 +1896,7 @@ jobs:
                                   )
                                   val winner = election.pickBestLeader(selfPeer, peersMap.values, excludeId = stepDownOriginId)
                                   if (winner != null && winner.nodeId == selfId) {
-                                      val (newHost, newEpoch) = election.declareSelfAsHost()
-                                      currentHostIdState.longValue = newHost
-                                      currentEpochState.longValue = newEpoch
-                                      val announce = JSONObject().apply {
-                                          put("t", "I_AM_HOST")
-                                          put("id", newHost)
-                                          put("epoch", newEpoch)
-                                      }
-                                      sendToAllDiscoveryTargets(announce)
-                                      leaderChangeEvent.value = "أصبحت أنت قائد السلسلة"
+                                      promoteSelfToLeaderAndHost()
                                   }
                                   electionTriggerMs = 0L
                                   stepDownOriginId = -1L
@@ -1164,32 +1908,19 @@ jobs:
                   }
 
                   private fun getAudioTargets(excludeIp: String? = null): List<InetAddress> {
-                      val list = ArrayList<InetAddress>()
+                      val set = LinkedHashSet<InetAddress>()
                       val activePeers = peersMap.values.filter { it.handshakeOk && it.ipAddress.isNotEmpty() }
-                      if (activePeers.isNotEmpty()) {
-                          for (p in activePeers) {
-                              if (p.ipAddress == excludeIp) continue
-                              if (!selectAllPeers && !allowedPeerIds.contains(p.nodeId) && p.chainRank != 1 && excludeIp == null) continue
-                              runCatching { list.add(InetAddress.getByName(p.ipAddress)) }
-                          }
-                      } else {
-                          list.addAll(cachedTargetIps)
+                      for (p in activePeers) {
+                          if (p.ipAddress == excludeIp) continue
+                          if (!selectAllPeers && !allowedPeerIds.contains(p.nodeId) && p.chainRank != 1 && excludeIp == null) continue
+                          runCatching { set.add(InetAddress.getByName(p.ipAddress)) }
                       }
-                      return list
-                  }
-
-                  private fun sendAck(toIp: String, seq: Int, fromName: String) {
-                      if (toIp.isEmpty()) return
-                      runCatching {
-                          val obj = JSONObject().apply {
-                              put("t", "ACK")
-                              put("id", selfId)
-                              put("name", userName)
-                              put("seq", seq)
-                              put("from", fromName)
+                      if (set.isEmpty() || activePeers.any { !it.isDirect }) {
+                          for (t in cachedTargetIps) {
+                              if (t.hostAddress != excludeIp) set.add(t)
                           }
-                          sendUnicastJson(obj, InetAddress.getByName(toIp))
                       }
+                      return set.toList()
                   }
 
                   private fun startAudioEngine() {
@@ -1197,85 +1928,22 @@ jobs:
                           audioSocket = DatagramSocket(null).apply {
                               reuseAddress = true
                               broadcast = true
+                              sendBufferSize = 65536
+                              receiveBufferSize = 65536
+                              trafficClass = 0xB8
                               bind(InetSocketAddress(AUDIO_PORT))
-                              soTimeout = 0
                           }
                       } catch (e: Exception) {
                           debugLastError.value = "AudioSocket: ${e.message}"
                           return
                       }
 
-                      // خيط الاستقبال + تعبئة مخزن الاهتزاز
+                      // RECEIVER & LOW-LATENCY JITTER-FREE PLAYER
                       scope.launch {
-                          val buf = ByteArray(4096)
-                          while (isActive) {
-                              try {
-                                  val pkt = DatagramPacket(buf, buf.size)
-                                  val sock = audioSocket ?: break
-                                  sock.receive(pkt)
-                                  if (pkt.length <= HEADER_SIZE) continue
-
-                                  val magic = pkt.data[0]
-                                  if (magic == MAGIC_ACK) {
-                                      // إقرار ثنائي بسيط (اختياري)
-                                      continue
-                                  }
-                                  if (magic != MAGIC_AUDIO) continue
-
-                                  val bb = ByteBuffer.wrap(pkt.data, 0, pkt.length)
-                                  bb.get()
-                                  val senderId = bb.long
-                                  if (senderId == selfId) continue
-                                  val seq = bb.int
-                                  val rank = bb.get().toInt()
-                                  val ttl = bb.get().toInt()
-
-                                  val dedupKey = (senderId * 31L) xor seq.toLong()
-                                  if (seenAudio.put(dedupKey, true) != null) continue
-
-                                  // إرسال إقرار وصول
-                                  val fromIp = pkt.address.hostAddress ?: ""
-                                  if (fromIp.isNotEmpty()) {
-                                      sendAck(fromIp, seq, peersMap[senderId]?.name ?: "راكب")
-                                  }
-
-                                  // ريلاي
-                                  if (ttl > 0 && peersMap.size > 1) {
-                                      val relayCopy = pkt.data.copyOf(pkt.length)
-                                      relayCopy[14] = (ttl - 1).toByte()
-                                      for (target in getAudioTargets(excludeIp = fromIp)) {
-                                          runCatching {
-                                              sock.send(DatagramPacket(relayCopy, relayCopy.size, target, AUDIO_PORT))
-                                          }
-                                      }
-                                  }
-
-                                  val allowed = selectAllPeers || allowedPeerIds.contains(senderId) || rank == 1
-                                  if (allowed) {
-                                      val audioLen = pkt.length - HEADER_SIZE
-                                      if (audioLen > 0) {
-                                          val frame = pkt.data.copyOfRange(HEADER_SIZE, HEADER_SIZE + audioLen)
-                                          // الحفاظ على حجم المخزن
-                                          while (jitterQueue.size >= MAX_JITTER_FRAMES) {
-                                              jitterQueue.poll()
-                                          }
-                                          jitterQueue.offer(frame)
-                                          lastPlayedSpeakerId = senderId
-                                          val name = peersMap[senderId]?.name ?: "راكب #$rank"
-                                          activeSpeakerName.value = if (rank == 1) "القائد ($name)" else "$name (راكب $rank)"
-                                      }
-                                  }
-                              } catch (e: Exception) {
-                                  if (isActive) delay(20)
-                              }
-                          }
-                      }
-
-                      // خيط التشغيل المستمر من المخزن (يمنع التشويش والانقطاع)
-                      scope.launch {
+                          android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
                           val minOut = AudioTrack.getMinBufferSize(
                               SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
-                          ).coerceAtLeast(FRAME_BYTES * 3)
+                          ).coerceAtLeast(SAMPLES_PER_FRAME * 4)
 
                           val track = AudioTrack.Builder()
                               .setAudioAttributes(
@@ -1291,311 +1959,187 @@ jobs:
                                       .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                                       .build()
                               )
-                              .setBufferSizeInBytes(minOut * 2)
-                              .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                              .setBufferSizeInBytes(minOut * 3)
                               .setTransferMode(AudioTrack.MODE_STREAM)
                               .build()
-
                           track.play()
 
+                          val buf = ByteArray(1024)
+                          val decodedShorts = ShortArray(SAMPLES_PER_FRAME)
+                          var lastSample: Int = 0
                           var lastClearJob: Job? = null
-                          val silence = ByteArray(FRAME_BYTES)
 
                           while (isActive) {
-                              val frame = jitterQueue.poll()
-                              if (frame != null) {
-                                  track.write(frame, 0, frame.size)
-                                  lastClearJob?.cancel()
-                                  lastClearJob = scope.launch {
-                                      delay(700L)
-                                      if (jitterQueue.isEmpty()) {
+                              try {
+                                  val pkt = DatagramPacket(buf, buf.size)
+                                  val sock = audioSocket ?: break
+                                  sock.receive(pkt)
+                                  if (pkt.length <= HEADER_SIZE || pkt.data[0] != MAGIC_AUDIO_ULAW) continue
+
+                                  val bb = ByteBuffer.wrap(pkt.data, 0, pkt.length).order(ByteOrder.LITTLE_ENDIAN)
+                                  bb.get()
+                                  val senderId = bb.long
+                                  if (senderId == selfId) continue
+                                  val seq = bb.int
+                                  val burstId = bb.int
+                                  val rank = bb.get().toInt()
+                                  val ttl = bb.get().toInt()
+                                  val modeFlags = bb.get().toInt()
+
+                                  val dedupKey = (senderId * 31L) xor seq.toLong()
+                                  if (seenAudio.put(dedupKey, true) != null) continue
+
+                                  val isPttTelegram = (modeFlags and 1) != 0 && burstId > 0
+                                  if (isPttTelegram) {
+                                      val bKey = (senderId shl 20) xor burstId.toLong()
+                                      if (receivedBurstsAcked.put(bKey, System.currentTimeMillis()) == null) {
+                                          sendBurstAck(senderId, burstId, pkt.address)
+                                      }
+                                  }
+
+                                  if (ttl > 0 && peersMap.size > 1) {
+                                      val relayCopy = pkt.data.copyOf(pkt.length)
+                                      relayCopy[18] = (ttl - 1).toByte()
+                                      val fromIp = pkt.address.hostAddress
+                                      for (target in getAudioTargets(excludeIp = fromIp)) {
+                                          runCatching {
+                                              sock.send(DatagramPacket(relayCopy, relayCopy.size, target, AUDIO_PORT))
+                                          }
+                                      }
+                                  }
+
+                                  val allowed = selectAllPeers || allowedPeerIds.contains(senderId) || rank == 1
+                                  if (allowed) {
+                                      val payloadLen = (pkt.length - HEADER_SIZE).coerceAtMost(SAMPLES_PER_FRAME)
+                                      for (i in 0 until payloadLen) {
+                                          val uByte = pkt.data[HEADER_SIZE + i].toInt() and 0xFF
+                                          val raw = ulawToLinearTable[uByte].toInt()
+                                          val smoothed = ((raw * 7 + lastSample) shr 3).coerceIn(-32768, 32767)
+                                          lastSample = smoothed
+                                          decodedShorts[i] = smoothed.toShort()
+                                      }
+                                      track.write(decodedShorts, 0, payloadLen, AudioTrack.WRITE_NON_BLOCKING)
+
+                                      val name = peersMap[senderId]?.name ?: "راكب #$rank"
+                                      val modeTag = if (isPttTelegram) "⚡ برقية من" else "🎙️ يتحدث"
+                                      activeSpeakerName.value = "$modeTag: $name (#$rank)"
+                                      lastClearJob?.cancel()
+                                      lastClearJob = scope.launch {
+                                          delay(550L)
                                           activeSpeakerName.value = null
                                       }
                                   }
-                              } else {
-                                  // صمت خفيف لتجنب انقطاع الصوت عند نقص الحزم
-                                  track.write(silence, 0, silence.size / 4)
-                                  delay(8)
+                              } catch (e: Exception) {
+                                  if (isActive) delay(20)
                               }
                           }
                           runCatching { track.stop(); track.release() }
                       }
 
-                      // خيط التسجيل والإرسال
+                      // TRANSMITTER (PTT Telegram + Red Open Mic with DC-Block & Clean u-law Compression)
                       scope.launch {
+                          android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
                           val minBuf = AudioRecord.getMinBufferSize(
                               SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-                          ).coerceAtLeast(FRAME_BYTES * 2)
-
+                          ).coerceAtLeast(SAMPLES_PER_FRAME * 4)
                           var recorder: AudioRecord? = null
-                          var noiseSup: NoiseSuppressor? = null
-                          var aec: AcousticEchoCanceler? = null
+                          val pcmShorts = ShortArray(SAMPLES_PER_FRAME)
+                          val pktBytes = ByteArray(HEADER_SIZE + SAMPLES_PER_FRAME)
+
+                          var prevX = 0
+                          var prevY = 0
 
                           while (isActive) {
-                              val active = isPttPressed || isOpenMicOn
+                              val pttNow = pttActiveInternal
+                              val openMicNow = isOpenMicOn
+                              val active = pttNow || openMicNow
                               if (!active) {
                                   if (recorder != null) {
-                                      runCatching {
-                                          noiseSup?.release()
-                                          aec?.release()
-                                          recorder?.stop()
-                                          recorder?.release()
-                                      }
+                                      runCatching { recorder?.stop(); recorder?.release() }
                                       recorder = null
-                                      noiseSup = null
-                                      aec = null
                                   }
-                                  delay(20L)
+                                  delay(15L)
                                   continue
                               }
-
                               if (recorder == null) {
                                   runCatching {
-                                      val rec = AudioRecord(
+                                      recorder = AudioRecord(
                                           MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                                           SAMPLE_RATE,
                                           AudioFormat.CHANNEL_IN_MONO,
                                           AudioFormat.ENCODING_PCM_16BIT,
                                           minBuf * 2
-                                      )
-                                      if (NoiseSuppressor.isAvailable()) {
-                                          noiseSup = NoiseSuppressor.create(rec.audioSessionId)?.also { it.enabled = true }
+                                      ).also { rec ->
+                                          if (NoiseSuppressor.isAvailable()) {
+                                              runCatching { NoiseSuppressor.create(rec.audioSessionId)?.enabled = true }
+                                          }
+                                          if (AcousticEchoCanceler.isAvailable()) {
+                                              runCatching { AcousticEchoCanceler.create(rec.audioSessionId)?.enabled = true }
+                                          }
+                                          if (AutomaticGainControl.isAvailable()) {
+                                              runCatching { AutomaticGainControl.create(rec.audioSessionId)?.enabled = true }
+                                          }
+                                          rec.startRecording()
                                       }
-                                      if (AcousticEchoCanceler.isAvailable()) {
-                                          aec = AcousticEchoCanceler.create(rec.audioSessionId)?.also { it.enabled = true }
-                                      }
-                                      rec.startRecording()
-                                      recorder = rec
-                                  }.onFailure {
-                                      debugLastError.value = "Mic: ${it.message}"
-                                      delay(300)
-                                  }
+                                      prevX = 0
+                                      prevY = 0
+                                  }.onFailure { debugLastError.value = "Mic: ${it.message}" }
                               }
 
-                              val pcm = ByteArray(FRAME_BYTES)
-                              val read = recorder?.read(pcm, 0, FRAME_BYTES) ?: -1
-                              if (read > 0) {
+                              val readSamples = recorder?.read(pcmShorts, 0, SAMPLES_PER_FRAME) ?: -1
+                              if (readSamples > 0) {
                                   val seq = seqCounter.getAndIncrement()
-                                  pendingAcks[seq] = System.currentTimeMillis()
+                                  val bId = if (pttNow) currentBurstId else 0
+                                  val flags: Byte = if (pttNow) 1 else 0
 
-                                  val pktBytes = ByteArray(HEADER_SIZE + read)
-                                  val bb = ByteBuffer.wrap(pktBytes)
-                                  bb.put(MAGIC_AUDIO)
+                                  val bb = ByteBuffer.wrap(pktBytes).order(ByteOrder.LITTLE_ENDIAN)
+                                  bb.put(MAGIC_AUDIO_ULAW)
                                   bb.putLong(selfId)
                                   bb.putInt(seq)
+                                  bb.putInt(bId)
                                   bb.put(chainRank.toByte())
-                                  bb.put(3.toByte()) // TTL أعلى قليلاً
-                                  bb.put(pcm, 0, read)
+                                  bb.put(2.toByte())
+                                  bb.put(flags)
 
+                                  for (i in 0 until readSamples) {
+                                      val x = pcmShorts[i].toInt()
+                                      val y = x - prevX + ((prevY * 251) shr 8)
+                                      prevX = x
+                                      prevY = y
+                                      val boosted = ((y * 11) shr 3).coerceIn(-32600, 32600)
+                                      pktBytes[HEADER_SIZE + i] = linearToUlaw(boosted)
+                                  }
+
+                                  val totalLen = HEADER_SIZE + readSamples
                                   val sock = audioSocket
                                   if (sock != null) {
                                       for (target in getAudioTargets()) {
                                           runCatching {
-                                              sock.send(DatagramPacket(pktBytes, pktBytes.size, target, AUDIO_PORT))
+                                              sock.send(DatagramPacket(pktBytes, totalLen, target, AUDIO_PORT))
                                           }
                                       }
                                   }
-                              } else {
-                                  delay(5)
                               }
                           }
-                          runCatching {
-                              noiseSup?.release()
-                              aec?.release()
-                              recorder?.stop()
-                              recorder?.release()
-                          }
-                      }
-                  }
-
-                  /** يُستدعى من الإشعار لإرسال برقية قصيرة */
-                  fun triggerShortPtt(durationMs: Long = 2500L) {
-                      scope.launch {
-                          isPttPressed = true
-                          delay(durationMs)
-                          isPttPressed = false
+                          runCatching { recorder?.stop(); recorder?.release() }
                       }
                   }
               }
           """)
 
           # =========================================================
-          # 8. MeshService.kt  (خدمة أمامية + إشعار شاشة القفل)
-          # =========================================================
-          write("app/src/main/java/com/bikemic/app/MeshService.kt", r"""
-              package com.bikemic.app
-
-              import android.app.*
-              import android.content.Context
-              import android.content.Intent
-              import android.content.pm.ServiceInfo
-              import android.os.Binder
-              import android.os.Build
-              import android.os.IBinder
-              import android.os.PowerManager
-              import androidx.core.app.NotificationCompat
-
-              class MeshService : Service() {
-
-                  companion object {
-                      const val CHANNEL_ID = "bikemic_voice_channel"
-                      const val NOTIF_ID = 1001
-                      const val ACTION_PTT = "com.bikemic.app.ACTION_PTT"
-                      const val ACTION_STOP = "com.bikemic.app.ACTION_STOP"
-                      @Volatile var instance: MeshService? = null
-                  }
-
-                  private val binder = LocalBinder()
-                  var engine: MeshVoiceEngine? = null
-                      private set
-                  private var health: DeviceHealthMonitor? = null
-                  private var wakeLock: PowerManager.WakeLock? = null
-
-                  inner class LocalBinder : Binder() {
-                      fun getService(): MeshService = this@MeshService
-                  }
-
-                  override fun onBind(intent: Intent?): IBinder = binder
-
-                  override fun onCreate() {
-                      super.onCreate()
-                      instance = this
-                      createNotificationChannel()
-                      acquireWakeLock()
-                  }
-
-                  override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-                      when (intent?.action) {
-                          ACTION_PTT -> {
-                              engine?.triggerShortPtt(2800L)
-                          }
-                          ACTION_STOP -> {
-                              stopSelf()
-                              return START_NOT_STICKY
-                          }
-                          else -> {
-                              startForegroundCompatible()
-                              if (engine == null) {
-                                  val prefs = getSharedPreferences("bikemic_p2p", Context.MODE_PRIVATE)
-                                  val e = MeshVoiceEngine(applicationContext).apply {
-                                      userName = prefs.getString("name", "أبو ناصر") ?: "أبو ناصر"
-                                      chainRank = prefs.getInt("rank", 1)
-                                  }
-                                  engine = e
-                                  health = DeviceHealthMonitor(applicationContext) { bat, chg, thm ->
-                                      e.updateHealth(bat, chg, thm)
-                                  }.also { it.start() }
-                                  e.start()
-                              }
-                          }
-                      }
-                      return START_STICKY
-                  }
-
-                  private fun startForegroundCompatible() {
-                      val notification = buildNotification()
-                      if (Build.VERSION.SDK_INT >= 34) {
-                          startForeground(
-                              NOTIF_ID,
-                              notification,
-                              ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
-                                      ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                          )
-                      } else if (Build.VERSION.SDK_INT >= 29) {
-                          startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-                      } else {
-                          startForeground(NOTIF_ID, notification)
-                      }
-                  }
-
-                  private fun createNotificationChannel() {
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                          val channel = NotificationChannel(
-                              CHANNEL_ID,
-                              getString(R.string.notification_channel_name),
-                              NotificationManager.IMPORTANCE_HIGH
-                          ).apply {
-                              description = "إشعار BikeMic للبرقية من شاشة القفل"
-                              setShowBadge(false)
-                              lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-                          }
-                          val nm = getSystemService(NotificationManager::class.java)
-                          nm.createNotificationChannel(channel)
-                      }
-                  }
-
-                  private fun buildNotification(): Notification {
-                      val openIntent = Intent(this, MainActivity::class.java).apply {
-                          flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                      }
-                      val openPi = PendingIntent.getActivity(
-                          this, 0, openIntent,
-                          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                      )
-
-                      val pttIntent = Intent(this, MeshService::class.java).apply { action = ACTION_PTT }
-                      val pttPi = PendingIntent.getService(
-                          this, 1, pttIntent,
-                          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                      )
-
-                      return NotificationCompat.Builder(this, CHANNEL_ID)
-                          .setContentTitle(getString(R.string.notification_title))
-                          .setContentText(getString(R.string.notification_text))
-                          .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                          .setContentIntent(openPi)
-                          .setOngoing(true)
-                          .setPriority(NotificationCompat.PRIORITY_HIGH)
-                          .setCategory(NotificationCompat.CATEGORY_CALL)
-                          .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                          .addAction(
-                              android.R.drawable.ic_btn_speak_now,
-                              getString(R.string.action_ptt),
-                              pttPi
-                          )
-                          .setColor(0xFFD32F2F.toInt())
-                          .build()
-                  }
-
-                  private fun acquireWakeLock() {
-                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                      wakeLock = pm.newWakeLock(
-                          PowerManager.PARTIAL_WAKE_LOCK,
-                          "BikeMic::VoiceWakeLock"
-                      ).apply {
-                          setReferenceCounted(false)
-                          acquire(60 * 60 * 1000L) // ساعة واحدةً كحد أقصى
-                      }
-                  }
-
-                  override fun onDestroy() {
-                      instance = null
-                      engine?.stop()
-                      health?.stop()
-                      runCatching { if (wakeLock?.isHeld == true) wakeLock?.release() }
-                      super.onDestroy()
-                  }
-              }
-          """)
-
-          # =========================================================
-          # 9. MainActivity.kt  (محسّن + ربط بالخدمة)
+          # 9. MainActivity.kt
           # =========================================================
           write("app/src/main/java/com/bikemic/app/MainActivity.kt", r"""
               package com.bikemic.app
 
               import android.Manifest
-              import android.content.ComponentName
               import android.content.Context
-              import android.content.Intent
-              import android.content.ServiceConnection
               import android.content.pm.PackageManager
-              import android.net.Uri
               import android.os.Build
               import android.os.Bundle
-              import android.os.IBinder
-              import android.os.PowerManager
-              import android.provider.Settings
+              import android.view.KeyEvent
+              import android.view.WindowManager
               import android.widget.Toast
               import androidx.activity.ComponentActivity
               import androidx.activity.compose.setContent
@@ -1607,6 +2151,7 @@ jobs:
               import androidx.compose.foundation.gestures.detectTapGestures
               import androidx.compose.foundation.layout.*
               import androidx.compose.foundation.lazy.LazyColumn
+              import androidx.compose.foundation.lazy.LazyRow
               import androidx.compose.foundation.lazy.items
               import androidx.compose.foundation.rememberScrollState
               import androidx.compose.foundation.shape.CircleShape
@@ -1633,24 +2178,23 @@ jobs:
               import kotlinx.coroutines.delay
 
               class MainActivity : ComponentActivity() {
-
-                  private var meshService: MeshService? = null
-                  private var bound = false
+                  private var engine: MeshVoiceEngine? = null
+                  private var health: DeviceHealthMonitor? = null
                   private val permissionsGranted = mutableStateOf(false)
-                  private val serviceReady = mutableStateOf(false)
+                  private val volumeKeyPttActive = mutableStateOf(false)
 
-                  private val connection = object : ServiceConnection {
-                      override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-                          val binder = service as MeshService.LocalBinder
-                          meshService = binder.getService()
-                          bound = true
-                          serviceReady.value = true
+                  private fun enableLockScreenVisibility() {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                          setShowWhenLocked(true)
+                          setTurnScreenOn(true)
                       }
-                      override fun onServiceDisconnected(name: ComponentName?) {
-                          bound = false
-                          meshService = null
-                          serviceReady.value = false
-                      }
+                      @Suppress("DEPRECATION")
+                      window.addFlags(
+                          WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                          WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                          WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                          WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
+                      )
                   }
 
                   private fun requiredPermissions(): Array<String> {
@@ -1679,21 +2223,21 @@ jobs:
                           finishAffinity()
                       } else {
                           permissionsGranted.value = true
-                          startAndBindService()
-                          requestBatteryOptimizationExemption()
+                          startAll()
                       }
                   }
 
                   override fun onCreate(savedInstanceState: Bundle?) {
+                      enableLockScreenVisibility()
                       super.onCreate(savedInstanceState)
+                      val prefs = getSharedPreferences("bikemic_p2p", Context.MODE_PRIVATE)
 
                       val missing = requiredPermissions().any {
                           ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
                       }
                       if (!missing) {
                           permissionsGranted.value = true
-                          startAndBindService()
-                          requestBatteryOptimizationExemption()
+                          startAll()
                       } else {
                           permLauncher.launch(requiredPermissions())
                       }
@@ -1702,25 +2246,21 @@ jobs:
                           CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
                               MaterialTheme(colorScheme = darkColorScheme(background = Color.Black, surface = Color(0xFF121212))) {
                                   Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
-                                      if (permissionsGranted.value && serviceReady.value && meshService?.engine != null) {
-                                          val engine = meshService!!.engine!!
+                                      if (permissionsGranted.value && engine != null) {
                                           val ctx = LocalContext.current
+                                          val volPtt by volumeKeyPttActive
                                           LaunchedEffect(Unit) {
                                               while (true) {
-                                                  engine.leaderChangeEvent.value?.let { msg ->
+                                                  engine?.leaderChangeEvent?.value?.let { msg ->
                                                       Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
-                                                      engine.leaderChangeEvent.value = null
+                                                      engine?.leaderChangeEvent?.value = null
                                                   }
-                                                  engine.ackReceivedEvent.value?.let { msg ->
-                                                      Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
-                                                      engine.ackReceivedEvent.value = null
-                                                  }
-                                                  delay(400L)
+                                                  delay(500L)
                                               }
                                           }
-                                          val prefs = getSharedPreferences("bikemic_p2p", Context.MODE_PRIVATE)
                                           BikeMicScreen(
-                                              engine = engine,
+                                              engine = engine!!,
+                                              externalPttActive = volPtt,
                                               initialName = prefs.getString("name", "أبو ناصر") ?: "أبو ناصر",
                                               initialRank = prefs.getInt("rank", 1),
                                               onSave = { n, r ->
@@ -1732,7 +2272,7 @@ jobs:
                                               Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                                   CircularProgressIndicator(color = Color.Red)
                                                   Spacer(Modifier.height(16.dp))
-                                                  Text("الرجاء منح الصلاحيات وانتظار بدء الخدمة...", color = Color.White)
+                                                  Text("الرجاء منح الصلاحيات للربط التلقائي...", color = Color.White)
                                               }
                                           }
                                       }
@@ -1742,42 +2282,61 @@ jobs:
                       }
                   }
 
-                  private fun startAndBindService() {
-                      val intent = Intent(this, MeshService::class.java)
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                          startForegroundService(intent)
-                      } else {
-                          startService(intent)
-                      }
-                      bindService(intent, connection, Context.BIND_AUTO_CREATE)
+                  override fun onResume() {
+                      super.onResume()
+                      enableLockScreenVisibility()
                   }
 
-                  private fun requestBatteryOptimizationExemption() {
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                          val pm = getSystemService(PowerManager::class.java)
-                          if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                              runCatching {
-                                  val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                                      data = Uri.parse("package:$packageName")
-                                  }
-                                  startActivity(intent)
-                              }
+                  override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+                      if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+                          if (!volumeKeyPttActive.value) {
+                              volumeKeyPttActive.value = true
+                              engine?.setPttPressed(true)
                           }
+                          return true
+                      }
+                      return super.onKeyDown(keyCode, event)
+                  }
+
+                  override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+                      if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+                          if (volumeKeyPttActive.value) {
+                              volumeKeyPttActive.value = false
+                              engine?.setPttPressed(false)
+                          }
+                          return true
+                      }
+                      return super.onKeyUp(keyCode, event)
+                  }
+
+                  private fun startAll() {
+                      if (engine == null) {
+                          val prefs = getSharedPreferences("bikemic_p2p", Context.MODE_PRIVATE)
+                          val e = MeshVoiceEngine(this).apply {
+                              userName = prefs.getString("name", "أبو ناصر") ?: "أبو ناصر"
+                              chainRank = prefs.getInt("rank", 1)
+                          }
+                          engine = e
+                          health = DeviceHealthMonitor(this) { bat, chg, thm ->
+                              e.updateHealth(bat, chg, thm)
+                          }.also { it.start() }
+                          e.start()
                       }
                   }
 
                   override fun onDestroy() {
-                      if (bound) {
-                          unbindService(connection)
-                          bound = false
-                      }
                       super.onDestroy()
+                      if (isFinishing) {
+                          engine?.stop()
+                          health?.stop()
+                      }
                   }
               }
 
               @Composable
               fun BikeMicScreen(
                   engine: MeshVoiceEngine,
+                  externalPttActive: Boolean,
                   initialName: String,
                   initialRank: Int,
                   onSave: (String, Int) -> Unit
@@ -1785,7 +2344,8 @@ jobs:
                   var name by remember { mutableStateOf(initialName) }
                   var rank by remember { mutableIntStateOf(initialRank) }
                   var editing by remember { mutableStateOf(false) }
-                  var ptt by remember { mutableStateOf(false) }
+                  var touchPtt by remember { mutableStateOf(false) }
+                  val ptt = touchPtt || externalPttActive
                   var micOn by remember { mutableStateOf(false) }
                   var showUsers by remember { mutableStateOf(false) }
                   var showRankDlg by remember { mutableStateOf(false) }
@@ -1793,51 +2353,33 @@ jobs:
                   var selectAll by remember { mutableStateOf(true) }
                   val selected = remember { mutableStateListOf<Long>() }
 
-                  val peers = remember { mutableStateListOf<PeerInfo>() }
+                  val peers = engine.peersListState
                   val ver by engine.peersVersion
                   val connected by engine.connectedCount
                   val status by engine.statusText
+                  val autoBanner by engine.autoNetBanner
                   val speaker by engine.activeSpeakerName
+                  val ackSummary by engine.lastAckSummary
+                  val ackedNames = engine.ackedPeerNames
                   val hostId by engine.currentHostIdState
                   val epoch by engine.currentEpochState
                   val sent by engine.debugSentCount
                   val received by engine.debugReceivedCount
                   val lastErr by engine.debugLastError
 
-                  LaunchedEffect(ver) {
-                      val list = engine.peersMap.values
-                          .filter { it.handshakeOk }
-                          .sortedBy { it.chainRank }
-                      peers.clear()
-                      peers.addAll(list)
-                  }
-
-                  // تحديث دوري إضافي لضمان ظهور الأسماء
-                  LaunchedEffect(Unit) {
-                      while (true) {
-                          delay(1500)
-                          val list = engine.peersMap.values
-                              .filter { it.handshakeOk }
-                              .sortedBy { it.chainRank }
-                          if (list.size != peers.size || list.map { it.nodeId } != peers.map { it.nodeId }) {
-                              peers.clear()
-                              peers.addAll(list)
-                          }
-                      }
-                  }
-
                   val isHost = hostId == engine.selfId
                   val pttColor by animateColorAsState(
-                      if (ptt) Color(0xFFBDBDBD) else Color(0xFF222222), label = "p"
+                      if (ptt) Color(0xFFFFD60A) else Color(0xFF242426), label = "p"
                   )
                   val micColor by animateColorAsState(
-                      if (micOn) Color(0xFFFF3B30) else Color(0xFF5C0A0A), label = "m"
+                      if (micOn) Color(0xFFFF3B30) else Color(0xFF4A0E0E), label = "m"
                   )
 
                   Box(
                       Modifier.fillMaxSize().background(Color.Black)
-                          .padding(horizontal = 16.dp, vertical = 14.dp)
+                          .padding(horizontal = 16.dp, vertical = 12.dp)
                   ) {
+                      // Top Bar
                       Row(
                           Modifier.fillMaxWidth().align(Alignment.TopCenter),
                           horizontalArrangement = Arrangement.SpaceBetween,
@@ -1879,10 +2421,30 @@ jobs:
                           }
                       }
 
+                      // Header + Zero-Touch Auto-Network Banner + Live Connected Rider Chips
                       Column(
-                          Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(top = 56.dp),
+                          Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(top = 50.dp),
                           horizontalAlignment = Alignment.CenterHorizontally
                       ) {
+                          Row(
+                              verticalAlignment = Alignment.CenterVertically,
+                              horizontalArrangement = Arrangement.Center
+                          ) {
+                              Icon(
+                                  Icons.Default.WifiTethering,
+                                  contentDescription = null,
+                                  tint = Color(0xFF32D74B),
+                                  modifier = Modifier.size(14.dp)
+                              )
+                              Spacer(Modifier.width(4.dp))
+                              Text(
+                                  autoBanner,
+                                  color = Color(0xFF32D74B),
+                                  fontSize = 11.sp,
+                                  fontWeight = FontWeight.SemiBold
+                              )
+                          }
+
                           if (editing) {
                               Row(verticalAlignment = Alignment.CenterVertically) {
                                   OutlinedTextField(
@@ -1903,7 +2465,7 @@ jobs:
                               Row(
                                   Modifier.clip(RoundedCornerShape(8.dp))
                                       .clickable { editing = true }
-                                      .padding(horizontal = 12.dp, vertical = 4.dp),
+                                      .padding(horizontal = 12.dp, vertical = 2.dp),
                                   verticalAlignment = Alignment.CenterVertically
                               ) {
                                   Text(name, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -1913,39 +2475,91 @@ jobs:
                           }
 
                           Text(
-                              if (isHost) "أنت القائد • Epoch $epoch" else "خلف القائد (Epoch $epoch)",
+                              if (isHost) "أنت القائد (نقطة اتصال تلقائية) • التحويل عند ≤ 3%" else "خلف القائد (ربط تلقائي) • بطاريتك ${engine.batteryPct}%",
                               color = if (isHost) Color(0xFFFFD60A) else Color(0xFF8E8E93),
-                              fontSize = 12.sp
-                          )
-                          Text(
-                              "بطارية: \( {engine.batteryPct}% \){if (engine.isCharging) " ⚡" else ""} • حرارة: ${thermalLabel(engine.thermalStatus)}",
-                              color = Color(0xFF636366), fontSize = 11.sp
+                              fontSize = 11.sp
                           )
 
-                          Spacer(Modifier.height(6.dp))
+                          if (peers.isNotEmpty()) {
+                              Spacer(Modifier.height(5.dp))
+                              LazyRow(
+                                  horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                  contentPadding = PaddingValues(horizontal = 8.dp)
+                              ) {
+                                  items(peers, key = { it.nodeId }) { p ->
+                                      val isPeerHost = p.nodeId == hostId
+                                      val didAck = ackedNames.contains("${p.name} (#${p.chainRank})")
+                                      Row(
+                                          Modifier
+                                              .clip(RoundedCornerShape(16.dp))
+                                              .background(if (didAck) Color(0xFF143D1B) else Color(0xFF1C1C1E))
+                                              .border(
+                                                  1.dp,
+                                                  if (didAck) Color(0xFF32D74B) else if (isPeerHost) Color(0xFFFFD60A) else Color(0xFF3A3A3C),
+                                                  RoundedCornerShape(16.dp)
+                                              )
+                                              .padding(horizontal = 10.dp, vertical = 4.dp),
+                                          verticalAlignment = Alignment.CenterVertically
+                                      ) {
+                                          Text(
+                                              text = (if (isPeerHost) "⭐ " else "🏍️ ") + "${p.name} (#${p.chainRank})" + (if (didAck) " ✓" else ""),
+                                              color = Color.White,
+                                              fontSize = 12.sp,
+                                              fontWeight = FontWeight.SemiBold
+                                          )
+                                      }
+                                  }
+                              }
+                          }
+
+                          Spacer(Modifier.height(5.dp))
                           if (speaker != null) {
-                              Text("يتحدث: $speaker", color = Color(0xFF32D74B), fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                              Text(speaker!!, color = Color(0xFF32D74B), fontSize = 15.sp, fontWeight = FontWeight.Bold)
                           } else {
                               Text(status, color = if (connected > 0) Color(0xFF32D74B) else Color(0xFFFF9F0A), fontSize = 12.sp)
                           }
+
+                          if (ackSummary != null) {
+                              Spacer(Modifier.height(5.dp))
+                              Box(
+                                  Modifier
+                                      .clip(RoundedCornerShape(10.dp))
+                                      .background(if (ackedNames.isNotEmpty()) Color(0xFF103818) else Color(0xFF2C2C2E))
+                                      .border(
+                                          1.dp,
+                                          if (ackedNames.isNotEmpty()) Color(0xFF32D74B) else Color(0xFFFFD60A),
+                                          RoundedCornerShape(10.dp)
+                                      )
+                                      .padding(horizontal = 12.dp, vertical = 5.dp)
+                              ) {
+                                  Text(
+                                      text = ackSummary!!,
+                                      color = if (ackedNames.isNotEmpty()) Color(0xFF32D74B) else Color(0xFFFFD60A),
+                                      fontSize = 12.sp,
+                                      fontWeight = FontWeight.Bold,
+                                      textAlign = TextAlign.Center
+                                  )
+                              }
+                          }
                       }
 
+                      // Giant Lock-Screen Ready PTT Button + Instant Red Open Mic Button
                       Column(
-                          Modifier.align(Alignment.Center).padding(top = 60.dp),
+                          Modifier.align(Alignment.Center).padding(top = 92.dp),
                           horizontalAlignment = Alignment.CenterHorizontally
                       ) {
                           Box(
-                              Modifier.size(230.dp).clip(CircleShape)
+                              Modifier.size(235.dp).clip(CircleShape)
                                   .background(pttColor)
-                                  .border(3.dp, if (ptt) Color.White else Color(0xFF3A3A3C), CircleShape)
+                                  .border(4.dp, if (ptt) Color.White else Color(0xFFFFD60A), CircleShape)
                                   .pointerInput(Unit) {
                                       detectTapGestures(
                                           onPress = {
-                                              ptt = true
-                                              engine.isPttPressed = true
+                                              touchPtt = true
+                                              engine.setPttPressed(true)
                                               tryAwaitRelease()
-                                              ptt = false
-                                              engine.isPttPressed = false
+                                              touchPtt = false
+                                              engine.setPttPressed(false)
                                           }
                                       )
                                   },
@@ -1954,48 +2568,50 @@ jobs:
                               Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                   Icon(
                                       Icons.Default.Bolt, null,
-                                      tint = if (ptt) Color.Black else Color(0xFF9E9E9E),
-                                      modifier = Modifier.size(64.dp)
+                                      tint = if (ptt) Color.Black else Color(0xFFFFD60A),
+                                      modifier = Modifier.size(68.dp)
                                   )
                                   Text(
                                       if (ptt) "جاري إرسال البرقية..." else "اضغط مطولاً للبرقية",
-                                      color = if (ptt) Color.Black else Color(0xFFB0B0B0),
-                                      fontSize = 15.sp, fontWeight = FontWeight.Bold
+                                      color = if (ptt) Color.Black else Color.White,
+                                      fontSize = 16.sp, fontWeight = FontWeight.Bold
+                                  )
+                                  Spacer(Modifier.height(4.dp))
+                                  Text(
+                                      if (ptt) "تصل فوراً مع تأكيد الاستلام" else "يعمل على شاشة القفل وبزر الصوت",
+                                      color = if (ptt) Color(0xFF222222) else Color(0xFFAEAEB2),
+                                      fontSize = 11.sp
                                   )
                               }
                           }
-                          Spacer(Modifier.height(34.dp))
+                          Spacer(Modifier.height(26.dp))
                           Box(
-                              Modifier.size(92.dp).clip(CircleShape)
+                              Modifier.size(88.dp).clip(CircleShape)
                                   .background(micColor)
                                   .border(2.dp, if (micOn) Color(0xFFFF8A80) else Color(0xFF8B0000), CircleShape)
-                                  .clickable {
-                                      micOn = !micOn
-                                      engine.isOpenMicOn = micOn
-                                  },
+                                  .clickable { micOn = !micOn; engine.isOpenMicOn = micOn },
                               contentAlignment = Alignment.Center
                           ) {
                               Icon(
                                   if (micOn) Icons.Default.Mic else Icons.Default.MicOff,
-                                  null, tint = Color.White, modifier = Modifier.size(42.dp)
+                                  null, tint = Color.White, modifier = Modifier.size(40.dp)
                               )
                           }
-                          Spacer(Modifier.height(10.dp))
+                          Spacer(Modifier.height(8.dp))
                           Text(
-                              if (micOn) "اتصال صوتي مباشر مفتوح" else "المايك مطفأ",
-                              color = if (micOn) Color(0xFFFF453A) else Color(0xFF636366),
+                              if (micOn) "المايك الأحمر مفتوح (صوت نقي وسريع)" else "المايك الأحمر مطفأ",
+                              color = if (micOn) Color(0xFFFF453A) else Color(0xFF8E8E93),
                               fontSize = 13.sp, fontWeight = FontWeight.SemiBold
                           )
                       }
 
-                      // قائمة المتصلين — تظهر للجميع
                       if (showUsers) {
                           AlertDialog(
                               onDismissRequest = { showUsers = false },
                               containerColor = Color(0xFF1C1C1E),
                               title = {
                                   Text(
-                                      "الدراجون المتصلون (${peers.size})",
+                                      "الدراجون المتصلون (${peers.size + 1})",
                                       color = Color.White,
                                       fontWeight = FontWeight.Bold
                                   )
@@ -2003,73 +2619,78 @@ jobs:
                               text = {
                                   Column {
                                       Row(
+                                          Modifier
+                                              .fillMaxWidth()
+                                              .clip(RoundedCornerShape(8.dp))
+                                              .background(Color(0xFF2C2C2E))
+                                              .padding(horizontal = 10.dp, vertical = 6.dp),
+                                          verticalAlignment = Alignment.CenterVertically
+                                      ) {
+                                          Text(
+                                              "أنت: $name (راكب #$rank)" + if (isHost) " ⭐ القائد" else "",
+                                              color = Color(0xFFFFD60A),
+                                              fontWeight = FontWeight.Bold,
+                                              fontSize = 13.sp
+                                          )
+                                      }
+                                      Spacer(Modifier.height(6.dp))
+                                      Row(
                                           Modifier.fillMaxWidth().clickable {
                                               selectAll = !selectAll
                                               engine.selectAllPeers = selectAll
-                                              if (selectAll) {
-                                                  peers.forEach {
-                                                      selected.add(it.nodeId)
-                                                      engine.allowedPeerIds.add(it.nodeId)
-                                                  }
+                                              if (selectAll) peers.forEach {
+                                                  if (!selected.contains(it.nodeId)) selected.add(it.nodeId)
+                                                  engine.allowedPeerIds.add(it.nodeId)
                                               }
-                                          }.padding(vertical = 6.dp),
+                                          }.padding(vertical = 4.dp),
                                           verticalAlignment = Alignment.CenterVertically
                                       ) {
-                                          Checkbox(
-                                              checked = selectAll,
-                                              onCheckedChange = { c ->
-                                                  selectAll = c
-                                                  engine.selectAllPeers = c
-                                                  if (c) {
-                                                      peers.forEach {
-                                                          selected.add(it.nodeId)
-                                                          engine.allowedPeerIds.add(it.nodeId)
-                                                      }
-                                                  }
+                                          Checkbox(checked = selectAll, onCheckedChange = { c ->
+                                              selectAll = c; engine.selectAllPeers = c
+                                              if (c) peers.forEach {
+                                                  if (!selected.contains(it.nodeId)) selected.add(it.nodeId)
+                                                  engine.allowedPeerIds.add(it.nodeId)
                                               }
-                                          )
+                                          })
                                           Text("ضم الكل في البرقيات والمكالمات", color = Color.White, fontSize = 13.sp)
                                       }
                                       HorizontalDivider(color = Color.DarkGray)
                                       Spacer(Modifier.height(8.dp))
                                       if (peers.isEmpty()) {
                                           Text(
-                                              "لا يوجد أحد بعد. افتح نقطة اتصال (Hotspot) في هاتف واحد واتصل بها من بقية الهواتف.",
-                                              color = Color.Gray,
-                                              fontSize = 13.sp
+                                              "جاري البحث والربط التلقائي عبر Wi-Fi Direct... تأكد من اختيار (راكب #1) في هاتف القائد و(راكب #2، #3...) في بقية الهواتف.",
+                                              color = Color.Gray, fontSize = 13.sp
                                           )
                                       } else {
-                                          LazyColumn(Modifier.heightIn(max = 300.dp)) {
+                                          LazyColumn(Modifier.heightIn(max = 280.dp)) {
                                               items(peers, key = { it.nodeId }) { p ->
                                                   val isHostP = p.nodeId == hostId
                                                   val checked = selectAll || selected.contains(p.nodeId)
+                                                  val acked = ackedNames.contains("${p.name} (#${p.chainRank})")
                                                   Row(
                                                       Modifier.fillMaxWidth().padding(vertical = 5.dp),
                                                       verticalAlignment = Alignment.CenterVertically
                                                   ) {
-                                                      Checkbox(
-                                                          checked = checked,
-                                                          onCheckedChange = { c ->
-                                                              selectAll = false
-                                                              engine.selectAllPeers = false
-                                                              if (c) {
-                                                                  selected.add(p.nodeId)
-                                                                  engine.allowedPeerIds.add(p.nodeId)
-                                                              } else {
-                                                                  selected.remove(p.nodeId)
-                                                                  engine.allowedPeerIds.remove(p.nodeId)
-                                                              }
+                                                      Checkbox(checked = checked, onCheckedChange = { c ->
+                                                          selectAll = false; engine.selectAllPeers = false
+                                                          if (c) {
+                                                              if (!selected.contains(p.nodeId)) selected.add(p.nodeId)
+                                                              engine.allowedPeerIds.add(p.nodeId)
+                                                          } else {
+                                                              selected.remove(p.nodeId)
+                                                              engine.allowedPeerIds.remove(p.nodeId)
                                                           }
-                                                      )
+                                                      })
                                                       Column(Modifier.weight(1f)) {
                                                           Text(
-                                                              "راكب ${p.chainRank}: ${p.name}" + if (isHostP) " ⭐" else "",
+                                                              "راكب #${p.chainRank}: ${p.name}" +
+                                                                  (if (isHostP) " ⭐ (القائد)" else "") +
+                                                                  (if (acked) " • ✓ استلم البرقية" else ""),
                                                               color = if (isHostP) Color(0xFFFFD60A) else Color.White,
-                                                              fontWeight = FontWeight.Bold,
-                                                              fontSize = 14.sp
+                                                              fontWeight = FontWeight.Bold, fontSize = 14.sp
                                                           )
                                                           Text(
-                                                              "IP: ${p.ipAddress.ifEmpty { "—" }} • بطارية ${p.batteryPct}% • ${thermalLabel(p.thermalStatus)}",
+                                                              "IP: ${p.ipAddress} • بطارية ${p.batteryPct}% • ${thermalLabel(p.thermalStatus)}",
                                                               color = Color(0xFF32D74B),
                                                               fontSize = 11.sp
                                                           )
@@ -2097,29 +2718,22 @@ jobs:
                               text = {
                                   LazyColumn(Modifier.height(280.dp)) {
                                       items((1..12).toList()) { num ->
-                                          val label = if (num == 1) "1 = قائد السلسلة" else "$num (خلف ${num - 1}، أمام ${num + 1})"
+                                          val label = if (num == 1) "1 = قائد السلسلة (ينشئ الشبكة تلقائياً)" else "$num (يرتبط بالقائد تلقائياً)"
                                           TextButton(
                                               onClick = {
-                                                  rank = num
-                                                  engine.updateUser(name, num)
-                                                  onSave(name, num)
+                                                  rank = num; engine.updateUser(name, num); onSave(name, num)
                                                   showRankDlg = false
                                               },
                                               modifier = Modifier.fillMaxWidth()
                                           ) {
-                                              Text(
-                                                  label,
-                                                  color = if (rank == num) Color(0xFFFF453A) else Color.White,
-                                                  fontWeight = if (rank == num) FontWeight.Bold else FontWeight.Normal
-                                              )
+                                              Text(label, color = if (rank == num) Color(0xFFFF453A) else Color.White,
+                                                   fontWeight = if (rank == num) FontWeight.Bold else FontWeight.Normal)
                                           }
                                       }
                                   }
                               },
                               confirmButton = {
-                                  TextButton(onClick = { showRankDlg = false }) {
-                                      Text("إغلاق", color = Color.Gray)
-                                  }
+                                  TextButton(onClick = { showRankDlg = false }) { Text("إغلاق", color = Color.Gray) }
                               }
                           )
                       }
@@ -2127,26 +2741,22 @@ jobs:
                       if (showInfo) {
                           val ifaces = remember(sent, ver) { engine.getDebugInterfaces() }
                           val bcasts = remember(sent, ver) { engine.getDebugBroadcasts() }
+                          val (gSsid, gPass) = remember(sent, ver) { engine.getAutoHotspotCredentials() }
                           AlertDialog(
                               onDismissRequest = { showInfo = false },
                               containerColor = Color(0xFF1C1C1E),
-                              title = {
-                                  Text("تشخيص الشبكة", color = Color.White, fontWeight = FontWeight.Bold)
-                              },
+                              title = { Text("تشخيص الشبكة التلقائية والصوت", color = Color.White, fontWeight = FontWeight.Bold) },
                               text = {
                                   Column(
-                                      modifier = Modifier
-                                          .heightIn(max = 380.dp)
-                                          .verticalScroll(rememberScrollState()),
+                                      modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
                                       verticalArrangement = Arrangement.spacedBy(5.dp)
                                   ) {
                                       Text("معرفك: ${engine.selfId}", color = Color.Gray, fontSize = 11.sp)
-                                      Text(
-                                          "القائد: ${if (isHost) "أنت" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")}",
-                                          color = Color.White,
-                                          fontSize = 12.sp
-                                      )
-                                      Text("Epoch: $epoch", color = Color.Gray, fontSize = 12.sp)
+                                      Text("القائد: ${if (isHost) "أنت ($name)" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")}", color = Color.White, fontSize = 12.sp)
+                                      Text("شرط تبديل القائد تلقائياً: البطارية ≤ 3%", color = Color(0xFFFFD60A), fontSize = 11.sp)
+                                      if (gSsid.isNotEmpty()) {
+                                          Text("شبكة القائد التلقائية: $gSsid (كلمة المرور: $gPass)", color = Color(0xFF32D74B), fontSize = 11.sp)
+                                      }
                                       HorizontalDivider(color = Color.DarkGray)
                                       Text("واجهات شبكتك:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                       if (ifaces.isEmpty()) {
@@ -2157,12 +2767,7 @@ jobs:
                                           }
                                       }
                                       HorizontalDivider(color = Color.DarkGray)
-                                      Text(
-                                          "الأهداف النشطة (Unicast / Gateway / Broadcast):",
-                                          color = Color(0xFF32D74B),
-                                          fontWeight = FontWeight.Bold,
-                                          fontSize = 12.sp
-                                      )
+                                      Text("الأهداف النشطة (Unicast / Gateway / Broadcast):", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                       bcasts.forEach { b ->
                                           Text("• $b", color = Color.White, fontSize = 11.sp)
                                       }
@@ -2170,13 +2775,8 @@ jobs:
                                       Text("إحصائيات:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                       Text("• حزم أُرسلت: $sent", color = Color.White, fontSize = 12.sp)
                                       Text("• حزم مستلمة من أقران: $received", color = Color.White, fontSize = 12.sp)
-                                      Text("• أقران مكتشفون: ${peers.size}", color = Color.White, fontSize = 12.sp)
+                                      Text("• أقران متصلون: ${peers.size}", color = Color.White, fontSize = 12.sp)
                                       Text("• حالة النظام: $lastErr", color = Color(0xFFFF9F0A), fontSize = 11.sp)
-                                      Text(
-                                          "ملاحظة: الإشعار الدائم يسمح بالبرقية من شاشة القفل.",
-                                          color = Color(0xFF8E8E93),
-                                          fontSize = 11.sp
-                                      )
                                   }
                               },
                               confirmButton = {
@@ -2199,7 +2799,7 @@ jobs:
               }
           """)
 
-          print("BikeMic P2P Mesh (AudioFix + LockScreen + ACK) generated successfully.")
+          print("BikeMic P2P Mesh project (Auto-Hotspot + 3% Handover + LockScreen + ACK) generated successfully.")
           PYEOF
           python3 /tmp/gen_bikemic_p2p.py
 
@@ -2215,22 +2815,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BikeMic-P2P-Mesh-AudioFix-LockScreen-APK
+          name: BikeMic-P2P-Mesh-Diagnostics-APK
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 30
-</pre>
 
-<div class="box success" style="margin-top: 30px;">
-<strong>ملاحظات مهمة بعد التثبيت:</strong>
-<ul>
-<li>عند أول تشغيل سيطلب التطبيق صلاحيات المايك والموقع والإشعارات. امنحها جميعاً.</li>
-<li>سيظهر إشعار دائم بعنوان «BikeMic نشط». من هذا الإشعار يمكنك الضغط على زر «برقية» حتى من شاشة القفل.</li>
-<li>يفضّل السماح للتطبيق بتجاهل تحسين البطارية حتى لا يتوقف في الخلفية.</li>
-<li>الصوت أصبح أوضح بكثير بفضل مخزن الاهتزاز والإطار الأكبر (40 مللي ثانية).</li>
-<li>عند إرسال برقية سيظهر على جهازك رسالة «تم الاستلام من فلان» عندما يستلمها الطرف الآخر.</li>
-</ul>
-</div>
-
-</div>
-</body>
-</html>
