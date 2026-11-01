@@ -1,4 +1,4 @@
-name: Build BikeMic P2P Mesh APK (Full Pro)
+name: Build BikeMic P2P Mesh APK (Pro)
 
 on:
   push:
@@ -57,11 +57,11 @@ jobs:
           test -s app/release.keystore
           echo "Temporary keystore generated."
 
-      - name: Generate Full P2P Mesh Project
+      - name: Generate P2P Mesh Pro Project
         env:
           RUN_NUM: ${{ github.run_number }}
         run: |
-          cat << 'PYEOF' > /tmp/gen_bikemic_full.py
+          cat << 'PYEOF' > /tmp/gen_bikemic_pro.py
           import os
           import textwrap
 
@@ -72,9 +72,7 @@ jobs:
 
           run_num = int(os.environ.get("RUN_NUM", "1") or "1")
 
-          # =========================================================
-          # 1. Gradle Config
-          # =========================================================
+          # 1. Gradle configuration
           write("gradle.properties", r"""
               org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
               android.useAndroidX=true
@@ -155,15 +153,13 @@ jobs:
                   implementation 'androidx.compose.material:material-icons-extended'
                   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
               }
-          """.replace("VERSION_CODE", str(1000 + run_num)).replace("VERSION_NAME", f"7.{run_num}"))
+          """.replace("VERSION_CODE", str(1100 + run_num)).replace("VERSION_NAME", f"8.{run_num}"))
 
           write("app/proguard-rules.pro", r"""
               -keep class com.bikemic.app.** { *; }
           """)
 
-          # =========================================================
           # 2. Resources & Manifest
-          # =========================================================
           write("app/src/main/res/values/strings.xml", r"""
               <?xml version="1.0" encoding="utf-8"?>
               <resources>
@@ -228,9 +224,7 @@ jobs:
               </manifest>
           """)
 
-          # =========================================================
           # 3. Models
-          # =========================================================
           write("app/src/main/java/com/bikemic/app/Models.kt", r"""
               package com.bikemic.app
 
@@ -249,9 +243,7 @@ jobs:
               )
           """)
 
-          # =========================================================
-          # 4. DeviceHealthMonitor (Battery + Thermal)
-          # =========================================================
+          # 4. DeviceHealthMonitor
           write("app/src/main/java/com/bikemic/app/DeviceHealthMonitor.kt", r"""
               package com.bikemic.app
 
@@ -323,9 +315,7 @@ jobs:
               }
           """)
 
-          # =========================================================
           # 5. LeaderElection
-          # =========================================================
           write("app/src/main/java/com/bikemic/app/LeaderElection.kt", r"""
               package com.bikemic.app
 
@@ -397,9 +387,7 @@ jobs:
               }
           """)
 
-          # =========================================================
-          # 6. MeshVoiceEngine (Jitter Buffer + ACKs + Diagnostics)
-          # =========================================================
+          # 6. MeshVoiceEngine (Jitter Buffer + ACKs)
           write("app/src/main/java/com/bikemic/app/MeshVoiceEngine.kt", r"""
               package com.bikemic.app
 
@@ -760,14 +748,12 @@ jobs:
                                       currentHostIdState.longValue = nHost; currentEpochState.longValue = nEpoch
                                       sendAll(JSONObject().apply { put("t", "I_AM_HOST"); put("id", nHost); put("epoch", nEpoch) })
                                   }
-                                  triggerMid = 0L; stepDownId = -1L
+                                  triggerMs = 0L; stepDownId = -1L
                               }
                               delay(1000L)
                           }
                       }
                   }
-
-                  private var triggerMid = 0L
 
                   // --- AUDIO ENGINE (Jitter Buffer) ---
                   private fun startAudioEngine() {
@@ -855,9 +841,7 @@ jobs:
               }
           """)
 
-          # =========================================================
           # 7. Foreground Service for Lock Screen
-          # =========================================================
           write("app/src/main/java/com/bikemic/app/BikeMicService.kt", r"""
               package com.bikemic.app
 
@@ -897,9 +881,7 @@ jobs:
               }
           """)
 
-          # =========================================================
-          # 8. MainActivity & UI
-          # =========================================================
+          # 8. MainActivity
           write("app/src/main/java/com/bikemic/app/MainActivity.kt", r"""
               package com.bikemic.app
 
@@ -1154,7 +1136,7 @@ jobs:
               }
           """)
           PYEOF
-          python3 /tmp/gen_bikemic_full.py
+          python3 /tmp/gen_bikemic_pro.py
 
       - name: Build Release APK
         run: gradle assembleRelease --no-daemon --stacktrace
@@ -1162,5 +1144,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BikeMic-Full-Pro-APK
+          name: BikeMic-Pro-APK
           path: app/build/outputs/apk/release/app-release.apk
