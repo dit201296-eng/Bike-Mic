@@ -1,4 +1,4 @@
-name: Build BikeMic P2P Mesh APK
+name: Build BikeMic P2P Mesh APK (Diagnostics)
 
 on:
   push:
@@ -21,6 +21,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Clean workspace from old files
+        run: |
+          rm -rf app build gradle settings.gradle settings.gradle.kts build.gradle build.gradle.kts gradle.properties local.properties
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -32,16 +36,13 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Prepare Android SDK & Licenses
+      - name: Prepare Android SDK
         run: |
           export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           mkdir -p "$ANDROID_SDK_ROOT/licenses"
           printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
           printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-preview-license"
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-          if [ -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-            yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" || true
-          fi
 
       - name: Generate temporary keystore (123456)
         run: |
@@ -56,7 +57,7 @@ jobs:
           test -s app/release.keystore
           echo "Temporary keystore generated."
 
-      - name: Generate P2P Mesh project (Complete)
+      - name: Generate P2P Mesh project with Diagnostics
         env:
           RUN_NUM: ${{ github.run_number }}
         run: |
@@ -71,7 +72,10 @@ jobs:
 
           run_num = int(os.environ.get("RUN_NUM", "1") or "1")
 
-          write("gradle.properties", """
+          # =========================================================
+          # 1. Gradle configuration
+          # =========================================================
+          write("gradle.properties", r"""
               org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
               android.useAndroidX=true
               android.nonTransitiveRClass=true
@@ -79,7 +83,7 @@ jobs:
               org.gradle.caching=true
           """)
 
-          write("settings.gradle", """
+          write("settings.gradle", r"""
               pluginManagement {
                   repositories {
                       google()
@@ -98,14 +102,14 @@ jobs:
               include ':app'
           """)
 
-          write("build.gradle", """
+          write("build.gradle", r"""
               plugins {
                   id 'com.android.application' version '8.3.2' apply false
                   id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
               }
           """)
 
-          write("app/build.gradle", """
+          write("app/build.gradle", r"""
               plugins {
                   id 'com.android.application'
                   id 'org.jetbrains.kotlin.android'
@@ -169,20 +173,23 @@ jobs:
                   implementation 'androidx.compose.material:material-icons-extended'
                   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
               }
-          """.replace("VERSION_CODE", str(700 + run_num)).replace("VERSION_NAME", f"4.{run_num}"))
+          """.replace("VERSION_CODE", str(800 + run_num)).replace("VERSION_NAME", f"5.{run_num}"))
 
-          write("app/proguard-rules.pro", """
+          write("app/proguard-rules.pro", r"""
               -keep class com.bikemic.app.** { *; }
           """)
 
-          write("app/src/main/res/values/strings.xml", """
+          # =========================================================
+          # 2. Resources & Icon
+          # =========================================================
+          write("app/src/main/res/values/strings.xml", r"""
               <?xml version="1.0" encoding="utf-8"?>
               <resources>
                   <string name="app_name">BikeMic</string>
               </resources>
           """)
 
-          write("app/src/main/res/values/styles.xml", """
+          write("app/src/main/res/values/styles.xml", r"""
               <?xml version="1.0" encoding="utf-8"?>
               <resources>
                   <style name="Theme.BikeMic" parent="android:Theme.Material.NoActionBar">
@@ -193,7 +200,7 @@ jobs:
               </resources>
           """)
 
-          write("app/src/main/res/drawable/ic_launcher_background.xml", """
+          write("app/src/main/res/drawable/ic_launcher_background.xml", r"""
               <?xml version="1.0" encoding="utf-8"?>
               <vector xmlns:android="http://schemas.android.com/apk/res/android"
                   android:width="108dp" android:height="108dp"
@@ -203,7 +210,7 @@ jobs:
               </vector>
           """)
 
-          write("app/src/main/res/drawable/ic_launcher_foreground.xml", """
+          write("app/src/main/res/drawable/ic_launcher_foreground.xml", r"""
               <?xml version="1.0" encoding="utf-8"?>
               <vector xmlns:android="http://schemas.android.com/apk/res/android"
                   android:width="108dp" android:height="108dp"
@@ -229,7 +236,7 @@ jobs:
               </vector>
           """)
 
-          write("app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml", """
+          write("app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml", r"""
               <?xml version="1.0" encoding="utf-8"?>
               <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
                   <background android:drawable="@drawable/ic_launcher_background"/>
@@ -237,7 +244,7 @@ jobs:
               </adaptive-icon>
           """)
 
-          write("app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml", """
+          write("app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml", r"""
               <?xml version="1.0" encoding="utf-8"?>
               <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
                   <background android:drawable="@drawable/ic_launcher_background"/>
@@ -245,7 +252,10 @@ jobs:
               </adaptive-icon>
           """)
 
-          write("app/src/main/AndroidManifest.xml", """
+          # =========================================================
+          # 3. AndroidManifest
+          # =========================================================
+          write("app/src/main/AndroidManifest.xml", r"""
               <?xml version="1.0" encoding="utf-8"?>
               <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -283,7 +293,10 @@ jobs:
               </manifest>
           """)
 
-          write("app/src/main/java/com/bikemic/app/Models.kt", """
+          # =========================================================
+          # 4. Models.kt
+          # =========================================================
+          write("app/src/main/java/com/bikemic/app/Models.kt", r"""
               package com.bikemic.app
 
               data class PeerInfo(
@@ -301,7 +314,10 @@ jobs:
               )
           """)
 
-          write("app/src/main/java/com/bikemic/app/DeviceHealthMonitor.kt", """
+          # =========================================================
+          # 5. DeviceHealthMonitor.kt
+          # =========================================================
+          write("app/src/main/java/com/bikemic/app/DeviceHealthMonitor.kt", r"""
               package com.bikemic.app
 
               import android.content.BroadcastReceiver
@@ -380,7 +396,10 @@ jobs:
               }
           """)
 
-          write("app/src/main/java/com/bikemic/app/LeaderElection.kt", """
+          # =========================================================
+          # 6. LeaderElection.kt
+          # =========================================================
+          write("app/src/main/java/com/bikemic/app/LeaderElection.kt", r"""
               package com.bikemic.app
 
               class LeaderElection(
@@ -459,7 +478,10 @@ jobs:
               }
           """)
 
-          write("app/src/main/java/com/bikemic/app/MeshVoiceEngine.kt", """
+          # =========================================================
+          # 7. MeshVoiceEngine.kt (No Regex escapes, Unicast + Gossip + Relay)
+          # =========================================================
+          write("app/src/main/java/com/bikemic/app/MeshVoiceEngine.kt", r"""
               package com.bikemic.app
 
               import android.content.Context
@@ -479,8 +501,7 @@ jobs:
               import kotlinx.coroutines.*
               import org.json.JSONArray
               import org.json.JSONObject
-              import java.io.BufferedReader
-              import java.io.FileReader
+              import java.io.File
               import java.net.DatagramPacket
               import java.net.DatagramSocket
               import java.net.Inet4Address
@@ -620,6 +641,16 @@ jobs:
                              n.startsWith("clat") || n.startsWith("v4-") || n.startsWith("lo")
                   }
 
+                  private fun isValidIpv4Literal(s: String): Boolean {
+                      val parts = s.split('.')
+                      if (parts.size != 4) return false
+                      for (p in parts) {
+                          val v = p.toIntOrNull() ?: return false
+                          if (v !in 0..255) return false
+                      }
+                      return s != "0.0.0.0"
+                  }
+
                   private fun refreshNetworkTopology() {
                       val targets = LinkedHashSet<InetAddress>()
                       val localIps = HashSet<String>()
@@ -666,6 +697,7 @@ jobs:
                           }
                       }
 
+                      // Read actual Hotspot/Router Gateway IP from ConnectivityManager (works on randomized Android 10+ hotspots)
                       runCatching {
                           val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                           for (net in cm.allNetworks) {
@@ -682,6 +714,7 @@ jobs:
                           }
                       }
 
+                      // Read WiFi DHCP Gateway fallback
                       runCatching {
                           val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                           @Suppress("DEPRECATION")
@@ -699,20 +732,19 @@ jobs:
                           }
                       }
 
+                      // Read ARP neighbors without Regex
                       runCatching {
-                          BufferedReader(FileReader("/proc/net/arp")).use { br ->
-                              var line = br.readLine()
-                              while (line != null) {
-                                  val parts = line.trim().split(Regex("\\s+"))
-                                  if (parts.size >= 6) {
-                                      val ip = parts[0]
-                                      val dev = parts[5]
-                                      if (ip.matches(Regex("\\d+\\.\\d+\\.\\d+\\.\\d+")) &&
-                                          ip != "0.0.0.0" && ip !in localIps && !isIgnoredInterface(dev)) {
+                          val arpFile = File("/proc/net/arp")
+                          if (arpFile.canRead()) {
+                              arpFile.forEachLine { line ->
+                                  val tokens = line.trim().split(' ', '\t').filter { it.isNotEmpty() }
+                                  if (tokens.size >= 6) {
+                                      val ip = tokens[0]
+                                      val dev = tokens[5]
+                                      if (isValidIpv4Literal(ip) && ip !in localIps && !isIgnoredInterface(dev)) {
                                           runCatching { targets.add(InetAddress.getByName(ip)) }
                                       }
                                   }
-                                  line = br.readLine()
                               }
                           }
                       }
@@ -1213,7 +1245,10 @@ jobs:
               }
           """)
 
-          write("app/src/main/java/com/bikemic/app/MainActivity.kt", """
+          # =========================================================
+          # 8. MainActivity.kt
+          # =========================================================
+          write("app/src/main/java/com/bikemic/app/MainActivity.kt", r"""
               package com.bikemic.app
 
               import android.Manifest
@@ -1281,7 +1316,7 @@ jobs:
                       val audio = result[Manifest.permission.RECORD_AUDIO] == true ||
                           ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
                       if (!audio) {
-                          Toast.makeText(this, "صلاحية المايك إلزامية للتشغيل.", Toast.LENGTH_LONG).show()
+                          Toast.makeText(this, "صلاحية المايك إلزامية. سيتم الإغلاق.", Toast.LENGTH_LONG).show()
                           finishAffinity()
                       } else {
                           permissionsGranted.value = true
@@ -1584,7 +1619,7 @@ jobs:
                                       Spacer(Modifier.height(8.dp))
                                       if (peers.isEmpty()) {
                                           Text(
-                                              "لا يوجد دراجون بعد. افتح نقطة اتصال (Hotspot) في هاتف واحد واتصل بها من بقية الهواتف.",
+                                              "لا يوجد أحد بعد. افتح نقطة اتصال (Hotspot) في هاتف واحد واتصل بها من بقية الهواتف.",
                                               color = Color.Gray, fontSize = 13.sp
                                           )
                                       } else {
@@ -1659,18 +1694,19 @@ jobs:
                           AlertDialog(
                               onDismissRequest = { showInfo = false },
                               containerColor = Color(0xFF1C1C1E),
-                              title = { Text("تشخيص الشبكة الحي", color = Color.White, fontWeight = FontWeight.Bold) },
+                              title = { Text("تشخيص الشبكة", color = Color.White, fontWeight = FontWeight.Bold) },
                               text = {
                                   Column(
                                       modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
                                       verticalArrangement = Arrangement.spacedBy(5.dp)
                                   ) {
                                       Text("معرفك: ${engine.selfId}", color = Color.Gray, fontSize = 11.sp)
-                                      Text("القائد: ${if (isHost) "أنت" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")} (Epoch $epoch)", color = Color.White, fontSize = 12.sp)
+                                      Text("القائد: ${if (isHost) "أنت" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")}", color = Color.White, fontSize = 12.sp)
+                                      Text("Epoch: $epoch", color = Color.Gray, fontSize = 12.sp)
                                       HorizontalDivider(color = Color.DarkGray)
-                                      Text("واجهات الشبكة النشطة:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                      Text("واجهات شبكتك:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                       if (ifaces.isEmpty()) {
-                                          Text("لا توجد واجهة واي فاي/هوتسبوت نشطة!", color = Color.Red, fontSize = 12.sp)
+                                          Text("لا توجد واجهات نشطة!", color = Color.Red, fontSize = 12.sp)
                                       } else {
                                           ifaces.forEach { (ifName, ip) ->
                                               Text("• $ifName: $ip", color = Color.White, fontSize = 12.sp)
@@ -1679,21 +1715,21 @@ jobs:
                                       HorizontalDivider(color = Color.DarkGray)
                                       Text("الأهداف النشطة (Unicast / Gateway / Broadcast):", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                       bcasts.forEach { b ->
-                                          Text("• $b", color = Color.LightGray, fontSize = 11.sp)
+                                          Text("• $b", color = Color.White, fontSize = 11.sp)
                                       }
                                       HorizontalDivider(color = Color.DarkGray)
-                                      Text("إحصائيات حقيقية (بدون صدى جهازك):", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                      Text("إحصائيات:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                       Text("• حزم أُرسلت: $sent", color = Color.White, fontSize = 12.sp)
-                                      Text("• حزم مستلمة من أقران آخرين: $received", color = Color.White, fontSize = 12.sp)
-                                      Text("• دراجون متصلون الآن: ${peers.size}", color = Color.White, fontSize = 12.sp)
-                                      Text("• آخر حالة نظام: $lastErr", color = Color(0xFFFF9F0A), fontSize = 11.sp)
+                                      Text("• حزم مستلمة من أقران: $received", color = Color.White, fontSize = 12.sp)
+                                      Text("• أقران مكتشفون: ${peers.size}", color = Color.White, fontSize = 12.sp)
+                                      Text("• حالة النظام: $lastErr", color = Color(0xFFFF9F0A), fontSize = 11.sp)
                                   }
                               },
                               confirmButton = {
                                   Button(
                                       onClick = { showInfo = false },
                                       colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF32D74B))
-                                  ) { Text("إغلاق", color = Color.Black) }
+                                  ) { Text("فهمت", color = Color.Black) }
                               }
                           )
                       }
@@ -1709,7 +1745,7 @@ jobs:
               }
           """)
 
-          print("BikeMic P2P Mesh project generated successfully.")
+          print("BikeMic P2P Mesh project with diagnostics generated successfully.")
           PYEOF
           python3 /tmp/gen_bikemic_p2p.py
 
@@ -1725,6 +1761,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BikeMic-P2P-Mesh-Fixed-APK
+          name: BikeMic-P2P-Mesh-Diagnostics-APK
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 30
