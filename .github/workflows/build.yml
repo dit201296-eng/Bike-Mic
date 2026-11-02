@@ -1,4 +1,4 @@
-name: Build BikeMic P2P Mesh APK (Smart Anti-Collision + 30% Power Election)
+name: Build BikeMic P2P Mesh APK (Bluetooth Headset + Smart Anti-Collision + 30% Power Election)
 
 on:
   push:
@@ -57,7 +57,7 @@ jobs:
           test -s app/release.keystore
           echo "Temporary keystore generated."
 
-      - name: Generate P2P Mesh project with Anti-Collision Auto-Hotspot & 30% Power Election
+      - name: Generate P2P Mesh project with Bluetooth Headset Routing, Anti-Collision & 30% Power Election
         env:
           RUN_NUM: ${{ github.run_number }}
         run: |
@@ -173,7 +173,7 @@ jobs:
                   implementation 'androidx.compose.material:material-icons-extended'
                   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
               }
-          """.replace("VERSION_CODE", str(1100 + run_num)).replace("VERSION_NAME", f"8.{run_num}"))
+          """.replace("VERSION_CODE", str(1200 + run_num)).replace("VERSION_NAME", f"9.{run_num}"))
 
           write("app/proguard-rules.pro", r"""
               -keep class com.bikemic.app.** { *; }
@@ -253,7 +253,7 @@ jobs:
           """)
 
           # =========================================================
-          # 3. AndroidManifest
+          # 3. AndroidManifest (Added BLUETOOTH, BLUETOOTH_ADMIN, BLUETOOTH_CONNECT, BROADCAST_STICKY)
           # =========================================================
           write("app/src/main/AndroidManifest.xml", r"""
               <?xml version="1.0" encoding="utf-8"?>
@@ -271,6 +271,10 @@ jobs:
                   <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
                   <uses-permission android:name="android.permission.RECORD_AUDIO" />
                   <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+                  <uses-permission android:name="android.permission.BLUETOOTH" />
+                  <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+                  <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+                  <uses-permission android:name="android.permission.BROADCAST_STICKY" />
                   <uses-permission android:name="android.permission.WAKE_LOCK" />
                   <uses-permission android:name="android.permission.VIBRATE" />
                   <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
@@ -303,7 +307,7 @@ jobs:
           """)
 
           # =========================================================
-          # 4. Models.kt (Includes hardwareSpecScore & totalPowerScore)
+          # 4. Models.kt
           # =========================================================
           write("app/src/main/java/com/bikemic/app/Models.kt", r"""
               package com.bikemic.app
@@ -326,7 +330,295 @@ jobs:
           """)
 
           # =========================================================
-          # 5. DeviceHealthMonitor.kt (Measures Battery, Thermal & Hardware Specs: RAM + CPU Cores)
+          # 5. BluetoothAudioRouter.kt
+          #    - Automatically detects and connects to Bluetooth Helmet intercoms, AirPods, Galaxy Buds,
+          #      Cardo/Sena headsets, and wired headsets!
+          #    - Supports BOTH modern Android 12+ (`AudioManager.setCommunicationDevice`) AND legacy
+          #      Android 8..11 (`startBluetoothSco()` + `isBluetoothScoOn = true`)
+          #    - Listens dynamically for Bluetooth connect/disconnect while the app is open
+          #    - Provides explicit preferred AudioDeviceInfo for both AudioRecord (Bluetooth Mic!) and AudioTrack (Bluetooth Speaker!)
+          # =========================================================
+          write("app/src/main/java/com/bikemic/app/BluetoothAudioRouter.kt", r"""
+              package com.bikemic.app
+
+              import android.annotation.SuppressLint
+              import android.bluetooth.BluetoothAdapter
+              import android.bluetooth.BluetoothHeadset
+              import android.content.BroadcastReceiver
+              import android.content.Context
+              import android.content.Intent
+              import android.content.IntentFilter
+              import android.media.AudioDeviceCallback
+              import android.media.AudioDeviceInfo
+              import android.media.AudioManager
+              import android.media.AudioRecord
+              import android.media.AudioTrack
+              import android.os.Build
+              import android.os.Handler
+              import android.os.Looper
+
+              @SuppressLint("MissingPermission")
+              class BluetoothAudioRouter(
+                  private val context: Context,
+                  private val onRouteChanged: (isBtConnected: Boolean, deviceName: String, routeLabel: String) -> Unit
+              ) {
+                  private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                  private val mainHandler = Handler(Looper.getMainLooper())
+
+                  @Volatile var isBluetoothActive: Boolean = false
+                      private set
+                  @Volatile var activeBtDeviceName: String = ""
+                      private set
+                  @Volatile var forceSpeakerOverride: Boolean = false
+                      private set
+                  @Volatile var preferredBtDevice: AudioDeviceInfo? = null
+                      private set
+
+                  private var deviceCallback: AudioDeviceCallback? = null
+                  private var btReceiver: BroadcastReceiver? = null
+
+                  fun start() {
+                      audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+
+                      deviceCallback = object : AudioDeviceCallback() {
+                          override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+                              refreshAudioRoute()
+                          }
+                          override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+                              refreshAudioRoute()
+                          }
+                      }
+                      audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler)
+
+                      val filter = IntentFilter().apply {
+                          addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
+                          addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
+                          addAction(BluetoothHeadset.ACTION_AUDIO_STATE_CHANGED)
+                          addAction(Intent.ACTION_HEADSET_PLUG)
+                      }
+                      btReceiver = object : BroadcastReceiver() {
+                          override fun onReceive(ctx: Context?, intent: Intent?) {
+                              val act = intent?.action ?: return
+                              if (act == AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED) {
+                                  val state = intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, -1)
+                                  if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED && !forceSpeakerOverride) {
+                                      @Suppress("DEPRECATION")
+                                      audioManager.isBluetoothScoOn = true
+                                      @Suppress("DEPRECATION")
+                                      audioManager.isSpeakerphoneOn = false
+                                      notifyCurrentState()
+                                  } else if (state == AudioManager.SCO_AUDIO_STATE_DISCONNECTED && !forceSpeakerOverride) {
+                                      // Retry or fallback if BT headset is still physically connected
+                                      mainHandler.postDelayed({ refreshAudioRoute() }, 600L)
+                                  }
+                              } else {
+                                  mainHandler.postDelayed({ refreshAudioRoute() }, 350L)
+                              }
+                          }
+                      }
+                      runCatching { context.registerReceiver(btReceiver, filter) }
+
+                      refreshAudioRoute()
+                  }
+
+                  fun toggleSpeakerOrBluetooth() {
+                      forceSpeakerOverride = !forceSpeakerOverride
+                      refreshAudioRoute()
+                  }
+
+                  private fun isBluetoothCommType(type: Int): Boolean {
+                      if (type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) return true
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                          if (type == AudioDeviceInfo.TYPE_BLE_HEADSET || type == AudioDeviceInfo.TYPE_BLE_SPEAKER) return true
+                      }
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                          if (type == AudioDeviceInfo.TYPE_BLE_BROADCAST) return true
+                      }
+                      return false
+                  }
+
+                  private fun isWiredHeadsetType(type: Int): Boolean {
+                      return type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                             type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                             type == AudioDeviceInfo.TYPE_USB_HEADSET
+                  }
+
+                  private fun findBestBluetoothDevice(): AudioDeviceInfo? {
+                      // 1. Check Android 12+ availableCommunicationDevices first
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                          runCatching {
+                              val commDevs = audioManager.availableCommunicationDevices
+                              val btComm = commDevs.firstOrNull { isBluetoothCommType(it.type) }
+                              if (btComm != null) return btComm
+                          }
+                      }
+                      // 2. Check all output/input devices for SCO / BLE / A2DP headset
+                      val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                      val btScoOrBle = outputs.firstOrNull { isBluetoothCommType(it.type) }
+                      if (btScoOrBle != null) return btScoOrBle
+
+                      val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+                      val btInput = inputs.firstOrNull { isBluetoothCommType(it.type) }
+                      if (btInput != null) return btInput
+
+                      // 3. Fallback: check if an A2DP Bluetooth device is connected (many earbuds appear as A2DP until SCO starts)
+                      val btA2dp = outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
+                      return btA2dp
+                  }
+
+                  private fun findWiredHeadsetDevice(): AudioDeviceInfo? {
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                          runCatching {
+                              val commDevs = audioManager.availableCommunicationDevices
+                              val wired = commDevs.firstOrNull { isWiredHeadsetType(it.type) }
+                              if (wired != null) return wired
+                          }
+                      }
+                      val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                      return outputs.firstOrNull { isWiredHeadsetType(it.type) }
+                  }
+
+                  fun refreshAudioRoute() {
+                      runCatching {
+                          audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                          val btDevice = findBestBluetoothDevice()
+                          val wiredDevice = findWiredHeadsetDevice()
+
+                          if (btDevice != null && !forceSpeakerOverride) {
+                              preferredBtDevice = btDevice
+                              val devName = btDevice.productName?.toString()?.takeIf { it.isNotBlank() } ?: "سماعة بلوتوث"
+                              activeBtDeviceName = devName
+                              isBluetoothActive = true
+
+                              // Stop speakerphone first so it never overrides Bluetooth!
+                              @Suppress("DEPRECATION")
+                              audioManager.isSpeakerphoneOn = false
+
+                              // Android 12+ (API 31+): setCommunicationDevice AND start SCO for full compatibility across OEMs
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                  runCatching {
+                                      val commDevs = audioManager.availableCommunicationDevices
+                                      val targetComm = commDevs.firstOrNull { isBluetoothCommType(it.type) } ?: btDevice
+                                      audioManager.setCommunicationDevice(targetComm)
+                                  }
+                              }
+
+                              // Also start Bluetooth SCO for HFP/HSP helmet intercoms & earbuds
+                              @Suppress("DEPRECATION")
+                              runCatching {
+                                  if (!audioManager.isBluetoothScoOn) {
+                                      audioManager.startBluetoothSco()
+                                      audioManager.isBluetoothScoOn = true
+                                  }
+                              }
+
+                              notifyCurrentState()
+                          } else if (wiredDevice != null && !forceSpeakerOverride) {
+                              preferredBtDevice = wiredDevice
+                              val devName = wiredDevice.productName?.toString()?.takeIf { it.isNotBlank() } ?: "سماعة سلكية"
+                              activeBtDeviceName = devName
+                              isBluetoothActive = true
+
+                              @Suppress("DEPRECATION")
+                              runCatching {
+                                  if (audioManager.isBluetoothScoOn) {
+                                      audioManager.isBluetoothScoOn = false
+                                      audioManager.stopBluetoothSco()
+                                  }
+                                  audioManager.isSpeakerphoneOn = false
+                              }
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                  runCatching { audioManager.setCommunicationDevice(wiredDevice) }
+                              }
+                              onRouteChanged(true, devName, "🎧 متصل بالسماعة: $devName")
+                          } else {
+                              // Route to Built-in Speakerphone when no headset is connected (or user manually toggled speaker)
+                              preferredBtDevice = null
+                              isBluetoothActive = false
+                              activeBtDeviceName = ""
+
+                              @Suppress("DEPRECATION")
+                              runCatching {
+                                  if (audioManager.isBluetoothScoOn) {
+                                      audioManager.isBluetoothScoOn = false
+                                      audioManager.stopBluetoothSco()
+                                  }
+                              }
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                  runCatching {
+                                      val speakerDev = audioManager.availableCommunicationDevices.firstOrNull {
+                                          it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                                      }
+                                      if (speakerDev != null) {
+                                          audioManager.setCommunicationDevice(speakerDev)
+                                      } else {
+                                          audioManager.clearCommunicationDevice()
+                                      }
+                                  }
+                              }
+                              @Suppress("DEPRECATION")
+                              audioManager.isSpeakerphoneOn = true
+
+                              val label = if (btDevice != null && forceSpeakerOverride) {
+                                  "🔊 مضخم الهاتف (اضغط للتحويل للبلوتوث)"
+                              } else {
+                                  "🔊 مضخم الهاتف (وصّل سماعة بلوتوث للتحويل التلقائي)"
+                              }
+                              onRouteChanged(false, "", label)
+                          }
+                      }
+                  }
+
+                  fun bindAudioTrackToPreferredDevice(track: AudioTrack) {
+                      runCatching {
+                          val pref = preferredBtDevice
+                          if (pref != null && !forceSpeakerOverride) {
+                              track.preferredDevice = pref
+                          } else {
+                              track.preferredDevice = null
+                          }
+                      }
+                  }
+
+                  fun bindAudioRecordToPreferredDevice(recorder: AudioRecord) {
+                      runCatching {
+                          if (!forceSpeakerOverride && isBluetoothActive) {
+                              val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+                              val btMic = inputs.firstOrNull { isBluetoothCommType(it.type) || isWiredHeadsetType(it.type) }
+                                  ?: preferredBtDevice
+                              if (btMic != null) {
+                                  recorder.preferredDevice = btMic
+                              }
+                          } else {
+                              recorder.preferredDevice = null
+                          }
+                      }
+                  }
+
+                  private fun notifyCurrentState() {
+                      val name = activeBtDeviceName.ifBlank { "سماعة بلوتوث" }
+                      onRouteChanged(true, name, "🎧 بلوتوث متصل: $name (مايك وسماعة)")
+                  }
+
+                  fun stop() {
+                      runCatching { deviceCallback?.let { audioManager.unregisterAudioDeviceCallback(it) } }
+                      runCatching { btReceiver?.let { context.unregisterReceiver(it) } }
+                      runCatching {
+                          @Suppress("DEPRECATION")
+                          if (audioManager.isBluetoothScoOn) {
+                              audioManager.isBluetoothScoOn = false
+                              audioManager.stopBluetoothSco()
+                          }
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                              audioManager.clearCommunicationDevice()
+                          }
+                      }
+                  }
+              }
+          """)
+
+          # =========================================================
+          # 6. DeviceHealthMonitor.kt
           # =========================================================
           write("app/src/main/java/com/bikemic/app/DeviceHealthMonitor.kt", r"""
               package com.bikemic.app
@@ -359,7 +651,6 @@ jobs:
                               val ramGb = (memInfo.totalMem / (1024L * 1024L * 1024L)).toInt().coerceIn(1, 24)
                               val cores = Runtime.getRuntime().availableProcessors().coerceIn(2, 16)
                               val sdkBonus = (Build.VERSION.SDK_INT - 26).coerceIn(0, 10)
-                              // Hardware spec points (typically 15..55 points)
                               (ramGb * 2) + cores + sdkBonus
                           }.getOrDefault(20)
                       }
@@ -424,16 +715,7 @@ jobs:
           """)
 
           # =========================================================
-          # 6. LeaderElection.kt
-          #    - Battery threshold = 30%:
-          #      1. If Leader battery < 30% (and not charging), check if ANY connected peer has battery >= 30%
-          #         and acceptable thermal status (< SEVERE).
-          #      2. If YES -> hand over leadership to the strongest peer!
-          #      3. If NO (ALL phones are < 30% battery) -> STAY on current leader without switching!
-          #    - Thermal awareness:
-          #      If Leader thermal >= SEVERE, hand over to a cooler peer (if a cooler peer exists).
-          #    - Priority by Device Power/Strength (Battery + Charging + Cool Thermal + Hardware RAM/CPU Score),
-          #      NOT static rank!
+          # 7. LeaderElection.kt (30% Battery Rule + Thermal + Device Power Score)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/LeaderElection.kt", r"""
               package com.bikemic.app
@@ -451,14 +733,6 @@ jobs:
                   private var thermalHighSinceMs: Long = 0L
                   private var lowBatSinceMs: Long = 0L
 
-                  /**
-                   * Calculates overall Device Power & Readiness Score:
-                   * - Battery %: 0..100 (x1.5 weight = 0..150 pts)
-                   * - Charging bonus: +35 pts
-                   * - Hardware Spec Score (RAM + CPU cores): +15..55 pts
-                   * - Thermal penalty: LIGHT (-15), MODERATE (-45), SEVERE (-120), CRITICAL (-1000)
-                   * - Above 30% Battery Tier Bonus: +200 pts so any device >= 30% always beats < 30%
-                   */
                   fun devicePowerScore(bat: Int, chg: Boolean, thermal: Int, hwScore: Int): Double {
                       if (thermal >= DeviceHealthMonitor.THERMAL_CRITICAL) return -1000.0
                       var score = (bat * 1.5) + hwScore.toDouble()
@@ -479,13 +753,6 @@ jobs:
                   fun peerPowerScore(p: PeerInfo): Double =
                       devicePowerScore(p.batteryPct, p.isCharging, p.thermalStatus, p.hardwareSpecScore)
 
-                  /**
-                   * Checks whether current leader should hand over leadership to another peer.
-                   * Returns the best replacement PeerInfo ONLY IF a genuinely better candidate exists!
-                   * - If battery < 30% (and not charging): only step down if at least one peer has battery >= 30% (or is charging)
-                   *   and thermal < SEVERE. If ALL peers are < 30%, returns null (stays as leader!).
-                   * - If thermal >= SEVERE: only step down if at least one peer has thermal < SEVERE.
-                   */
                   fun findReplacementIfShouldStepDown(
                       selfPeer: PeerInfo,
                       peers: Collection<PeerInfo>,
@@ -530,7 +797,6 @@ jobs:
                                   lowBatSinceMs = 0L
                                   return bestHealthy to "البطارية أقل من 30%"
                               }
-                              // Otherwise: all peers are also < 30%! Keep current leader!
                           }
                       } else {
                           lowBatSinceMs = 0L
@@ -539,12 +805,6 @@ jobs:
                       return null
                   }
 
-                  /**
-                   * Picks the strongest phone across all connected riders (used on initial mesh formation
-                   * or when the previous Leader phone turns off / disconnects).
-                   * Priority is strictly by Device Power Score (Battery >= 30%, Thermal, RAM/CPU, Battery %),
-                   * with nodeId as deterministic tie-breaker.
-                   */
                   fun pickBestLeader(selfPeer: PeerInfo, peers: Collection<PeerInfo>, excludeId: Long = -1L): PeerInfo? {
                       val all = ArrayList<PeerInfo>(peers.size + 1)
                       all.add(selfPeer)
@@ -585,20 +845,7 @@ jobs:
           """)
 
           # =========================================================
-          # 7. AutoMeshHotspotManager.kt
-          #    - Fixes the dual-network collision completely!
-          #    - First checks if phone is ALREADY on a manual Mobile Hotspot or Wi-Fi LAN with peers:
-          #      if manual Hotspot is active on this phone, NEVER call WifiP2pManager (which would trigger
-          #      Android's "هل تريد إيقاف تشغيل نقطة اتصال الهواتف المحمولة؟" popup!).
-          #    - When no Hotspot exists, uses Smart Anti-Collision P2P Arbitration:
-          #      1. Every phone advertises its presence & DevicePowerScore via Wi-Fi Direct DNS-SD (`_bikemic._udp`)
-          #         and listens first (`Listen-Before-Create`).
-          #      2. Phones compare their `(DevicePowerScore, nodeId)` during discovery.
-          #      3. ONLY the single strongest phone creates the Wi-Fi Direct Hotspot Group (`DIRECT-BM-BIKEMIC`),
-          #         while the other phone(s) wait and automatically join it!
-          #      4. If a rare race happens where two phones both created a group before seeing each other,
-          #         the weaker phone detects the stronger phone's DNS-SD broadcast, automatically tears down
-          #         its duplicate group (`removeGroup`), and connects to the stronger phone!
+          # 8. AutoMeshHotspotManager.kt
           # =========================================================
           write("app/src/main/java/com/bikemic/app/AutoMeshHotspotManager.kt", r"""
               package com.bikemic.app
@@ -675,11 +922,6 @@ jobs:
 
                   private val nearbyCandidates = ConcurrentHashMap<Long, DiscoveredP2pCandidate>()
 
-                  /**
-                   * Checks if the user already has a standard Android Mobile Hotspot (SoftAP / tethering) turned on.
-                   * If so, we MUST NOT call WifiP2pManager.createGroup or discoverServices because Android shows a
-                   * blocking system dialog: "هل تريد إيقاف تشغيل نقطة اتصال الهواتف المحمولة؟".
-                   */
                   private fun isSystemMobileHotspotActive(): Boolean {
                       runCatching {
                           val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -693,7 +935,6 @@ jobs:
                               val nif = ifaces.nextElement()
                               if (!nif.isUp || nif.isLoopback) continue
                               val n = nif.name.lowercase()
-                              // swlan / ap / wlan1 / rndis with 192.168.43.x or 192.168.x.x where p2p is not in the name
                               if (n.startsWith("ap") || n.startsWith("swlan") || n.startsWith("softap") || n == "wlan1") {
                                   for (ia in nif.interfaceAddresses) {
                                       if (ia.address is Inet4Address && !ia.address.isLoopbackAddress) return true
@@ -735,15 +976,12 @@ jobs:
                       setupDnsSdDiscoveryListener()
 
                       scope.launch {
-                          // Clean up any leftover stale group from a previous session so two phones don't start in conflict
                           clearStaleGroupOnStartup()
                           delay(700L)
 
-                          // Phase 1: Advertise our presence & power score + listen for 2.5 seconds before anyone creates a group
                           advertisePresenceAndGroup()
                           startServiceDiscoverySweep()
 
-                          // Deterministic stagger: stronger phones have shorter wait (2.2s..3.2s), weaker phones wait longer (3.8s..5.5s)
                           val myScore = getSelfPowerScore().coerceIn(0, 400)
                           val waitMs = (4800L - (myScore * 6L) + (selfId % 700L)).coerceIn(2200L, 5200L)
                           delay(waitMs)
@@ -801,13 +1039,11 @@ jobs:
                   }
 
                   private fun arbitrateAndMaintainNetwork() {
-                      // 1. If manual mobile hotspot is active or we already have live UDP peers over Wi-Fi/Hotspot, don't disrupt!
                       if (isSystemMobileHotspotActive()) {
                           onStatusChange("متصل عبر نقطة اتصال الهاتف")
                           return
                       }
                       if (getActiveUdpPeerCount() > 0) {
-                          // Already talking to peers over UDP! Keep advertising if we are GO, otherwise do nothing disruptive.
                           if (isGroupOwnerNow && groupSsid.isNotEmpty()) {
                               advertisePresenceAndGroup()
                           }
@@ -815,7 +1051,6 @@ jobs:
                       }
 
                       val now = System.currentTimeMillis()
-                      // Prune old candidates (> 12s)
                       nearbyCandidates.entries.removeIf { now - it.value.seenAtMs > 12_000L }
 
                       val mgr = p2pManager ?: return
@@ -830,9 +1065,6 @@ jobs:
 
                               if (group.isGroupOwner) {
                                   groupOwnerIp = "192.168.49.1"
-                                  // Anti-Collision check: If we are hosting an EMPTY group (0 clients connected)
-                                  // AND we see another phone already hosting a group (or a stronger phone),
-                                  // yield immediately so both phones don't stay in separate groups!
                                   val strongerOrActiveHost = nearbyCandidates.values.firstOrNull { cand ->
                                       cand.isHostingGroup && isStrongerThanSelf(cand.powerScore, cand.nodeId)
                                   }
@@ -865,13 +1097,11 @@ jobs:
                               return@requestGroupInfo
                           }
 
-                          // No group is currently formed on this phone:
                           isConnectedNow = false
                           isGroupOwnerNow = false
                           groupSsid = ""
                           groupPass = ""
 
-                          // Check if any nearby phone is ALREADY hosting a group:
                           val existingHost = nearbyCandidates.values
                               .filter { it.isHostingGroup && it.ssid.isNotEmpty() }
                               .maxWithOrNull(compareBy<DiscoveredP2pCandidate> { it.powerScore }.thenBy { -it.nodeId })
@@ -883,18 +1113,15 @@ jobs:
                               return@requestGroupInfo
                           }
 
-                          // Check if any nearby phone has a HIGHER power score than us:
                           val strongerPeer = nearbyCandidates.values.firstOrNull {
                               isStrongerThanSelf(it.powerScore, it.nodeId)
                           }
 
                           val inStepDownCooldown = now < steppedDownUntilMs
                           if (forcedHostByElection || (!inStepDownCooldown && strongerPeer == null)) {
-                              // We are the strongest phone (or sole phone after listen window) -> Create the single group!
                               onElectLeaderFromP2p(selfId)
                               startAutonomousHostGroup()
                           } else {
-                              // Wait for the stronger phone to open its group and keep scanning
                               onStatusChange("بانتظار شبكة الهاتف الأقوى للاتصال التلقائي...")
                               advertisePresenceAndGroup()
                               startServiceDiscoverySweep()
@@ -1023,7 +1250,6 @@ jobs:
                               seenAtMs = now
                           )
 
-                          // Case 1: Both phones created a group at the same time (collision!), and the other phone is stronger:
                           if (isGroupOwnerNow && remoteIsGo && isStrongerThanSelf(remotePwr, remoteId) && getActiveUdpPeerCount() == 0) {
                               onStatusChange("منع تضارب الشبكة: التحويل تلقائياً إلى شبكة الهاتف الأقوى...")
                               onElectLeaderFromP2p(remoteId)
@@ -1040,7 +1266,6 @@ jobs:
                               return@DnsSdTxtRecordListener
                           }
 
-                          // Case 2: We are not in a group, and the other phone is already hosting a group -> join immediately!
                           if (!isGroupOwnerNow && !isConnectedNow && remoteIsGo && ssid.isNotEmpty()) {
                               if (now - lastConnectAttemptMs >= 5500L) {
                                   lastConnectAttemptMs = now
@@ -1110,7 +1335,6 @@ jobs:
                       val mgr = p2pManager
                       val ch = channel
 
-                      // Only connect via P2P device if that device is ALREADY a Group Owner (prevents 2-way GO negotiation collision)
                       if (mgr != null && ch != null && device != null && device.deviceAddress.isNotEmpty() && device.isGroupOwner) {
                           val cfg = WifiP2pConfig().apply {
                               deviceAddress = device.deviceAddress
@@ -1255,12 +1479,7 @@ jobs:
           """)
 
           # =========================================================
-          # 8. MeshVoiceEngine.kt
-          #    - Integrates Anti-Collision AutoMeshHotspotManager + 30% Battery & Device Power Election
-          #    - Automatic failover when Leader phone powers off or disconnects
-          #    - Little-Endian G.711 u-law 8-bit ultra-lightweight audio (320 bytes/frame = 20ms)
-          #    - Full Mesh Gossip so ALL riders see all connected names
-          #    - Instant PTT Burst Delivery Confirmation (ACKs with Rider names + Sound/Vibration)
+          # 9. MeshVoiceEngine.kt (Integrates BluetoothAudioRouter + Anti-Collision + 30% Power Election)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/MeshVoiceEngine.kt", r"""
               package com.bikemic.app
@@ -1282,6 +1501,7 @@ jobs:
               import android.os.PowerManager
               import android.os.VibrationEffect
               import android.os.Vibrator
+              import androidx.compose.runtime.mutableStateOf
               import androidx.compose.runtime.mutableIntStateOf
               import androidx.compose.runtime.mutableLongStateOf
               import androidx.compose.runtime.mutableStateListOf
@@ -1342,6 +1562,10 @@ jobs:
                   val activeSpeakerName = mutableStateOf<String?>(null)
                   val leaderChangeEvent = mutableStateOf<String?>(null)
 
+                  // Bluetooth Audio state
+                  val isBtConnectedState = mutableStateOf(false)
+                  val btRouteLabelState = mutableStateOf("🔊 مضخم الهاتف (وصّل سماعة بلوتوث للتحويل التلقائي)")
+
                   // PTT Telegram ACK tracking
                   val ackedPeerNames = mutableStateListOf<String>()
                   val lastAckSummary = mutableStateOf<String?>(null)
@@ -1377,9 +1601,13 @@ jobs:
                   private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
                   private val seqCounter = AtomicInteger(1)
 
-                  // minHealthyBattery = 30 -> Leader hands over when battery < 30% (unless all phones are < 30%)
                   private val election = LeaderElection(selfId, minHealthyBattery = 30)
                   private var autoHotspot: AutoMeshHotspotManager? = null
+                  var btAudioRouter: BluetoothAudioRouter? = null
+                      private set
+                  @Volatile private var activeAudioTrack: AudioTrack? = null
+                  @Volatile private var activeAudioRecorder: AudioRecord? = null
+
                   private var multicastLock: WifiManager.MulticastLock? = null
                   private var wifiLock: WifiManager.WifiLock? = null
                   private var cpuWakeLock: PowerManager.WakeLock? = null
@@ -1444,6 +1672,18 @@ jobs:
                           handshakeOk = true
                       )
 
+                  fun toggleAudioRoute() {
+                      btAudioRouter?.toggleSpeakerOrBluetooth()
+                      activeAudioTrack?.let { btAudioRouter?.bindAudioTrackToPreferredDevice(it) }
+                      activeAudioRecorder?.let { btAudioRouter?.bindAudioRecordToPreferredDevice(it) }
+                  }
+
+                  fun refreshBluetoothNow() {
+                      btAudioRouter?.refreshAudioRoute()
+                      activeAudioTrack?.let { btAudioRouter?.bindAudioTrackToPreferredDevice(it) }
+                      activeAudioRecorder?.let { btAudioRouter?.bindAudioRecordToPreferredDevice(it) }
+                  }
+
                   fun setPttPressed(pressed: Boolean) {
                       if (pressed && !pttActiveInternal) {
                           val bId = burstCounter.incrementAndGet()
@@ -1505,15 +1745,20 @@ jobs:
                           }
                       }.onFailure { debugLastError.value = "WifiLock: ${it.message}" }
 
-                      runCatching {
-                          val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                          am.mode = AudioManager.MODE_IN_COMMUNICATION
-                          am.isSpeakerphoneOn = true
+                      // Start Automatic Bluetooth Headset & Helmet Intercom Audio Router
+                      btAudioRouter = BluetoothAudioRouter(context) { isBt, devName, label ->
+                          mainScope.launch {
+                              isBtConnectedState.value = isBt
+                              btRouteLabelState.value = label
+                          }
+                          activeAudioTrack?.let { btAudioRouter?.bindAudioTrackToPreferredDevice(it) }
+                          activeAudioRecorder?.let { btAudioRouter?.bindAudioRecordToPreferredDevice(it) }
+                      }.also {
+                          it.start()
                       }
 
                       knownHintIps.add("192.168.49.1")
 
-                      // Start Anti-Collision AutoMeshHotspotManager (Listens first & elects strongest phone!)
                       autoHotspot = AutoMeshHotspotManager(
                           context = context,
                           selfId = selfId,
@@ -1554,7 +1799,6 @@ jobs:
                   }
 
                   fun stop() {
-                      // Send graceful GOODBYE packet before shutting down so other phones immediately hand over leadership
                       runCatching {
                           val bye = JSONObject().apply {
                               put("t", "GOODBYE")
@@ -1565,6 +1809,7 @@ jobs:
                       }
                       scope.cancel()
                       mainScope.cancel()
+                      runCatching { btAudioRouter?.stop() }
                       runCatching { autoHotspot?.stop() }
                       runCatching { discoverySocket?.close() }
                       runCatching { multicastSocket?.close() }
@@ -1939,7 +2184,6 @@ jobs:
                                       currentEpochState.longValue = election.currentEpoch
                                   }
 
-                                  // Full Mesh Gossip table
                                   val gossipArr = msg.optJSONArray("peers")
                                   if (gossipArr != null) {
                                       for (i in 0 until gossipArr.length()) {
@@ -2055,7 +2299,6 @@ jobs:
                                   }
                               }
                               "GOODBYE" -> {
-                                  // Peer turned off / closed app -> immediately remove and trigger election if it was Leader!
                                   val wasHost = (senderId == election.currentHostId)
                                   peersMap.remove(senderId)
                                   syncPeersToCompose()
@@ -2144,7 +2387,6 @@ jobs:
                               runCatching {
                                   sendHeartbeatNow()
                                   val now = System.currentTimeMillis()
-                                  // Fast 5.5s timeout so if Leader phone powers off/dies, remaining phones detect it quickly!
                                   val dead = peersMap.filterValues { now - it.lastSeenMs > 5500L }.keys
                                   if (dead.isNotEmpty()) {
                                       val hostDied = dead.contains(election.currentHostId)
@@ -2169,8 +2411,6 @@ jobs:
                               val currentHost = election.currentHostId
                               val selfPeer = buildSelfPeerInfo(now)
 
-                              // 1. If we have peers and are at initial epoch 0 (or current host is missing),
-                              //    automatically elect the phone with the highest Device Power Score!
                               val hostMissing = currentHost != selfId && !peersMap.containsKey(currentHost)
                               if (peersMap.isNotEmpty() && (election.currentEpoch == 0L || hostMissing)) {
                                   val winner = election.pickBestLeader(selfPeer, peersMap.values)
@@ -2185,11 +2425,6 @@ jobs:
                                   }
                               }
 
-                              // 2. If we ARE the current Leader:
-                              //    Check if our battery dropped below 30% (and at least one peer is >= 30%),
-                              //    OR if our phone temperature is severe (and a cooler peer exists).
-                              //    Note: If ALL phones are < 30% battery, findReplacementIfShouldStepDown returns null
-                              //    so we STAY as Leader without oscillating!
                               if (currentHost == selfId && peersMap.isNotEmpty()) {
                                   val replacementPair = election.findReplacementIfShouldStepDown(selfPeer, peersMap.values, now)
                                   if (replacementPair != null) {
@@ -2249,7 +2484,7 @@ jobs:
                           return
                       }
 
-                      // RECEIVER & LOW-LATENCY JITTER-FREE PLAYER
+                      // RECEIVER & LOW-LATENCY JITTER-FREE PLAYER (Routes automatically to Bluetooth Headset!)
                       scope.launch {
                           android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
                           val minOut = AudioTrack.getMinBufferSize(
@@ -2273,6 +2508,8 @@ jobs:
                               .setBufferSizeInBytes(minOut * 3)
                               .setTransferMode(AudioTrack.MODE_STREAM)
                               .build()
+                          activeAudioTrack = track
+                          btAudioRouter?.bindAudioTrackToPreferredDevice(track)
                           track.play()
 
                           val buf = ByteArray(1024)
@@ -2344,10 +2581,11 @@ jobs:
                                   if (isActive) delay(20)
                               }
                           }
+                          activeAudioTrack = null
                           runCatching { track.stop(); track.release() }
                       }
 
-                      // TRANSMITTER
+                      // TRANSMITTER (Uses Bluetooth Headset Mic automatically when connected!)
                       scope.launch {
                           android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
                           val minBuf = AudioRecord.getMinBufferSize(
@@ -2366,6 +2604,7 @@ jobs:
                               val active = pttNow || openMicNow
                               if (!active) {
                                   if (recorder != null) {
+                                      activeAudioRecorder = null
                                       runCatching { recorder?.stop(); recorder?.release() }
                                       recorder = null
                                   }
@@ -2374,6 +2613,8 @@ jobs:
                               }
                               if (recorder == null) {
                                   runCatching {
+                                      // Ensure Bluetooth SCO / Communication Device is active right before recording
+                                      btAudioRouter?.refreshAudioRoute()
                                       recorder = AudioRecord(
                                           MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                                           SAMPLE_RATE,
@@ -2381,6 +2622,8 @@ jobs:
                                           AudioFormat.ENCODING_PCM_16BIT,
                                           minBuf * 2
                                       ).also { rec ->
+                                          activeAudioRecorder = rec
+                                          btAudioRouter?.bindAudioRecordToPreferredDevice(rec)
                                           if (NoiseSuppressor.isAvailable()) {
                                               runCatching { NoiseSuppressor.create(rec.audioSessionId)?.enabled = true }
                                           }
@@ -2432,6 +2675,7 @@ jobs:
                                   }
                               }
                           }
+                          activeAudioRecorder = null
                           runCatching { recorder?.stop(); recorder?.release() }
                       }
                   }
@@ -2439,7 +2683,7 @@ jobs:
           """)
 
           # =========================================================
-          # 9. MainActivity.kt
+          # 10. MainActivity.kt (Requests BLUETOOTH_CONNECT on Android 12+, supports Bluetooth Headset Buttons!)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/MainActivity.kt", r"""
               package com.bikemic.app
@@ -2517,6 +2761,10 @@ jobs:
                           Manifest.permission.ACCESS_FINE_LOCATION,
                           Manifest.permission.ACCESS_COARSE_LOCATION
                       )
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                          // Mandatory on Android 12+ to route audio/mic to Bluetooth Headsets!
+                          p.add(Manifest.permission.BLUETOOTH_CONNECT)
+                      }
                       if (Build.VERSION.SDK_INT >= 33) {
                           p.add(Manifest.permission.NEARBY_WIFI_DEVICES)
                           p.add(Manifest.permission.POST_NOTIFICATIONS)
@@ -2584,7 +2832,7 @@ jobs:
                                               Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                                   CircularProgressIndicator(color = Color.Red)
                                                   Spacer(Modifier.height(16.dp))
-                                                  Text("الرجاء منح الصلاحيات للربط التلقائي...", color = Color.White)
+                                                  Text("الرجاء منح صلاحيات المايك والبلوتوث للبدء...", color = Color.White)
                                               }
                                           }
                                       }
@@ -2597,13 +2845,26 @@ jobs:
                   override fun onResume() {
                       super.onResume()
                       enableLockScreenVisibility()
+                      engine?.refreshBluetoothNow()
                   }
 
+                  // Support Volume Up/Down AND Bluetooth Headset Call/Play button for hands-free PTT!
                   override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
                       if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
                           if (!volumeKeyPttActive.value) {
                               volumeKeyPttActive.value = true
                               engine?.setPttPressed(true)
+                          }
+                          return true
+                      }
+                      if (keyCode == KeyEvent.KEYCODE_HEADSETHOOK ||
+                          keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
+                          keyCode == KeyEvent.KEYCODE_MEDIA_PLAY ||
+                          keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE ||
+                          keyCode == KeyEvent.KEYCODE_CALL) {
+                          val e = engine
+                          if (e != null) {
+                              e.isOpenMicOn = !e.isOpenMicOn
                           }
                           return true
                       }
@@ -2634,6 +2895,8 @@ jobs:
                               e.updateHealth(bat, chg, thm)
                           }.also { it.start() }
                           e.start()
+                      } else {
+                          engine?.refreshBluetoothNow()
                       }
                   }
 
@@ -2671,6 +2934,8 @@ jobs:
                   val connected by engine.connectedCount
                   val status by engine.statusText
                   val autoBanner by engine.autoNetBanner
+                  val isBtConnected by engine.isBtConnectedState
+                  val btRouteLabel by engine.btRouteLabelState
                   val speaker by engine.activeSpeakerName
                   val ackSummary by engine.lastAckSummary
                   val ackedNames = engine.ackedPeerNames
@@ -2713,6 +2978,14 @@ jobs:
                           }
 
                           Row(verticalAlignment = Alignment.CenterVertically) {
+                              // Bluetooth Headset Quick Toggle / Refresh Pill
+                              IconButton(onClick = { engine.toggleAudioRoute() }) {
+                                  Icon(
+                                      if (isBtConnected) Icons.Default.BluetoothConnected else Icons.Default.VolumeUp,
+                                      contentDescription = "تبديل البلوتوث / السماعة",
+                                      tint = if (isBtConnected) Color(0xFF0A84FF) else Color(0xFF8E8E93)
+                                  )
+                              }
                               IconButton(onClick = { showInfo = true }) {
                                   Icon(
                                       Icons.Default.Info,
@@ -2734,11 +3007,41 @@ jobs:
                           }
                       }
 
-                      // Header + Anti-Collision Auto-Network Banner + Live Connected Rider Chips
+                      // Header + Bluetooth Pill + Anti-Collision Banner + Live Connected Rider Chips
                       Column(
                           Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(top = 50.dp),
                           horizontalAlignment = Alignment.CenterHorizontally
                       ) {
+                          // Bluetooth Headset Status Pill (Clickable to toggle or refresh Bluetooth SCO)
+                          Row(
+                              Modifier
+                                  .clip(RoundedCornerShape(14.dp))
+                                  .background(if (isBtConnected) Color(0xFF0B2545) else Color(0xFF1C1C1E))
+                                  .border(
+                                      1.dp,
+                                      if (isBtConnected) Color(0xFF0A84FF) else Color(0xFF3A3A3C),
+                                      RoundedCornerShape(14.dp)
+                                  )
+                                  .clickable { engine.toggleAudioRoute() }
+                                  .padding(horizontal = 10.dp, vertical = 4.dp),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Icon(
+                                  if (isBtConnected) Icons.Default.HeadsetMic else Icons.Default.VolumeUp,
+                                  contentDescription = null,
+                                  tint = if (isBtConnected) Color(0xFF5AC8FA) else Color(0xFFAEAEB2),
+                                  modifier = Modifier.size(14.dp)
+                              )
+                              Spacer(Modifier.width(5.dp))
+                              Text(
+                                  btRouteLabel,
+                                  color = if (isBtConnected) Color(0xFF5AC8FA) else Color(0xFFAEAEB2),
+                                  fontSize = 11.sp,
+                                  fontWeight = FontWeight.SemiBold
+                              )
+                          }
+
+                          Spacer(Modifier.height(3.dp))
                           Row(
                               verticalAlignment = Alignment.CenterVertically,
                               horizontalArrangement = Arrangement.Center
@@ -2747,7 +3050,7 @@ jobs:
                                   Icons.Default.WifiTethering,
                                   contentDescription = null,
                                   tint = Color(0xFF32D74B),
-                                  modifier = Modifier.size(14.dp)
+                                  modifier = Modifier.size(13.dp)
                               )
                               Spacer(Modifier.width(4.dp))
                               Text(
@@ -2789,7 +3092,7 @@ jobs:
 
                           Text(
                               if (isHost) {
-                                  "⭐ أنت القائد (الأقوى: ${engine.getSelfPowerScoreInt()} نقطة • بطارية ${engine.batteryPct}% • حرارة ${thermalLabel(engine.thermalStatus)})"
+                                  "⭐ أنت القائد (قوة ${engine.getSelfPowerScoreInt()} • بطارية ${engine.batteryPct}% • حرارة ${thermalLabel(engine.thermalStatus)})"
                               } else {
                                   "متصل بالقائد • قوتك ${engine.getSelfPowerScoreInt()} • بطارية ${engine.batteryPct}% • ${thermalLabel(engine.thermalStatus)}"
                               },
@@ -2799,7 +3102,7 @@ jobs:
                           )
 
                           if (peers.isNotEmpty()) {
-                              Spacer(Modifier.height(5.dp))
+                              Spacer(Modifier.height(4.dp))
                               LazyRow(
                                   horizontalArrangement = Arrangement.spacedBy(6.dp),
                                   contentPadding = PaddingValues(horizontal = 8.dp)
@@ -2830,7 +3133,7 @@ jobs:
                               }
                           }
 
-                          Spacer(Modifier.height(5.dp))
+                          Spacer(Modifier.height(4.dp))
                           if (speaker != null) {
                               Text(speaker!!, color = Color(0xFF32D74B), fontSize = 15.sp, fontWeight = FontWeight.Bold)
                           } else {
@@ -2838,7 +3141,7 @@ jobs:
                           }
 
                           if (ackSummary != null) {
-                              Spacer(Modifier.height(5.dp))
+                              Spacer(Modifier.height(4.dp))
                               Box(
                                   Modifier
                                       .clip(RoundedCornerShape(10.dp))
@@ -2863,11 +3166,11 @@ jobs:
 
                       // Giant Lock-Screen Ready PTT Button + Instant Red Open Mic Button
                       Column(
-                          Modifier.align(Alignment.Center).padding(top = 92.dp),
+                          Modifier.align(Alignment.Center).padding(top = 104.dp),
                           horizontalAlignment = Alignment.CenterHorizontally
                       ) {
                           Box(
-                              Modifier.size(235.dp).clip(CircleShape)
+                              Modifier.size(230.dp).clip(CircleShape)
                                   .background(pttColor)
                                   .border(4.dp, if (ptt) Color.White else Color(0xFFFFD60A), CircleShape)
                                   .pointerInput(Unit) {
@@ -2887,7 +3190,7 @@ jobs:
                                   Icon(
                                       Icons.Default.Bolt, null,
                                       tint = if (ptt) Color.Black else Color(0xFFFFD60A),
-                                      modifier = Modifier.size(68.dp)
+                                      modifier = Modifier.size(66.dp)
                                   )
                                   Text(
                                       if (ptt) "جاري إرسال البرقية..." else "اضغط مطولاً للبرقية",
@@ -2896,15 +3199,15 @@ jobs:
                                   )
                                   Spacer(Modifier.height(4.dp))
                                   Text(
-                                      if (ptt) "تصل فوراً مع تأكيد الاستلام" else "يعمل على شاشة القفل وبزر الصوت",
+                                      if (ptt) "تصل فوراً عبر سماعة البلوتوث" else "يعمل على شاشة القفل وبزر الصوت",
                                       color = if (ptt) Color(0xFF222222) else Color(0xFFAEAEB2),
                                       fontSize = 11.sp
                                   )
                               }
                           }
-                          Spacer(Modifier.height(26.dp))
+                          Spacer(Modifier.height(22.dp))
                           Box(
-                              Modifier.size(88.dp).clip(CircleShape)
+                              Modifier.size(86.dp).clip(CircleShape)
                                   .background(micColor)
                                   .border(2.dp, if (micOn) Color(0xFFFF8A80) else Color(0xFF8B0000), CircleShape)
                                   .clickable { micOn = !micOn; engine.isOpenMicOn = micOn },
@@ -2912,12 +3215,12 @@ jobs:
                           ) {
                               Icon(
                                   if (micOn) Icons.Default.Mic else Icons.Default.MicOff,
-                                  null, tint = Color.White, modifier = Modifier.size(40.dp)
+                                  null, tint = Color.White, modifier = Modifier.size(38.dp)
                               )
                           }
-                          Spacer(Modifier.height(8.dp))
+                          Spacer(Modifier.height(6.dp))
                           Text(
-                              if (micOn) "المايك الأحمر مفتوح (صوت نقي وسريع)" else "المايك الأحمر مطفأ",
+                              if (micOn) "المايك الأحمر مفتوح (بلوتوث / نقي)" else "المايك الأحمر مطفأ",
                               color = if (micOn) Color(0xFFFF453A) else Color(0xFF8E8E93),
                               fontSize = 13.sp, fontWeight = FontWeight.SemiBold
                           )
@@ -3064,19 +3367,15 @@ jobs:
                           AlertDialog(
                               onDismissRequest = { showInfo = false },
                               containerColor = Color(0xFF1C1C1E),
-                              title = { Text("تشخيص القائد الذكي والشبكة", color = Color.White, fontWeight = FontWeight.Bold) },
+                              title = { Text("تشخيص البلوتوث والشبكة", color = Color.White, fontWeight = FontWeight.Bold) },
                               text = {
                                   Column(
                                       modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
                                       verticalArrangement = Arrangement.spacedBy(5.dp)
                                   ) {
+                                      Text("حالة الصوت: $btRouteLabel", color = Color(0xFF5AC8FA), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                       Text("قوة هاتفك الإجمالية: ${engine.getSelfPowerScoreInt()} نقطة (مواصفات الجهاز: ${engine.hardwareSpecScore})", color = Color(0xFFFFD60A), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                       Text("القائد الحالي: ${if (isHost) "أنت ($name)" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")}", color = Color.White, fontSize = 12.sp)
-                                      Text("قواعد القيادة الذكية:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                      Text("• الأولوية للهاتف الأقوى (بطارية ≥ 30% + برودة الجهاز + رام ومعالج).", color = Color.White, fontSize = 11.sp)
-                                      Text("• إذا نزلت بطارية القائد تحت 30% ينتقل لهاتف فوق 30% تلقائياً.", color = Color.White, fontSize = 11.sp)
-                                      Text("• إذا كان الجميع تحت 30% يظل القائد كما هو بدون تذبذب.", color = Color.White, fontSize = 11.sp)
-                                      Text("• إذا انطفأ هاتف القائد أو ارتفعت حرارته ينتقل تلقائياً للهاتف التالي.", color = Color.White, fontSize = 11.sp)
                                       if (gSsid.isNotEmpty()) {
                                           Text("شبكة القائد التلقائية: $gSsid", color = Color(0xFF32D74B), fontSize = 11.sp)
                                       }
@@ -3116,7 +3415,7 @@ jobs:
               }
           """)
 
-          print("BikeMic P2P Mesh project (v8 Anti-Collision + 30% Power Election) generated successfully.")
+          print("BikeMic P2P Mesh project (v9 Bluetooth Headset + Anti-Collision + 30% Power Election) generated successfully.")
           PYEOF
           python3 /tmp/gen_bikemic_p2p.py
 
