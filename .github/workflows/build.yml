@@ -1,4 +1,4 @@
-name: Build BikeMic P2P Mesh APK (v11 Organized UI + 40s Auto-Cycle + BT)
+name: Build BikeMic P2P Mesh APK (v12 Mute Noisy Mic + Unmutable PTT + 40s Auto-Cycle)
 
 on:
   push:
@@ -57,7 +57,7 @@ jobs:
           test -s app/release.keystore
           echo "Temporary keystore generated."
 
-      - name: Generate P2P Mesh project with Clean UI & 40s Host/Search Cycle
+      - name: Generate P2P Mesh project with Clean UI, 40s Cycle & Per-Rider Open-Mic Mute
         env:
           RUN_NUM: ${{ github.run_number }}
         run: |
@@ -173,7 +173,7 @@ jobs:
                   implementation 'androidx.compose.material:material-icons-extended'
                   implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
               }
-          """.replace("VERSION_CODE", str(1400 + run_num)).replace("VERSION_NAME", f"11.{run_num}"))
+          """.replace("VERSION_CODE", str(1500 + run_num)).replace("VERSION_NAME", f"12.{run_num}"))
 
           write("app/proguard-rules.pro", r"""
               -keep class com.bikemic.app.** { *; }
@@ -815,19 +815,7 @@ jobs:
           """)
 
           # =========================================================
-          # 8. AutoMeshHotspotManager.kt
-          #    - Implements the exact 40-Second Host / Search Alternating Cycle requested by the user:
-          #      1. Upon startup, first performs a quick initial search (8..14s randomized by power score)
-          #         so if another phone already has an active hotspot, we connect to it right away!
-          #      2. If no hotspot is found, enters HOST PHASE for 40 SECONDS (with live countdown 40..1s):
-          #         - Activates automatic hotspot (`createGroup`), verifies activation within 4s (never hangs on
-          #           "جاري تفعيل..."), and waits up to 40s for peers to join.
-          #         - If any peer connects (UDP peer count > 0 or P2P client list > 0), locks the connection
-          #           and stays connected!
-          #      3. If 40 seconds expire and NO peer connected:
-          #         - Closes the hotspot (`removeGroup`) and switches to SEARCH PHASE (16..24s randomized)
-          #           to search for other riders who activated their hotspot from the app!
-          #      4. Repeats (40s Host <-> Search) infinitely until riders find each other!
+          # 8. AutoMeshHotspotManager.kt (40s Host <-> Search Alternating Cycle)
           # =========================================================
           write("app/src/main/java/com/bikemic/app/AutoMeshHotspotManager.kt", r"""
               package com.bikemic.app
@@ -961,8 +949,6 @@ jobs:
                   }
 
                   private fun computeSearchDurationSec(): Int {
-                      // Stronger phones search for a shorter time (10..15s) and host sooner;
-                      // weaker phones search longer (16..24s) so their cycles naturally desynchronize and meet!
                       val pwr = getSelfPowerScore().coerceIn(50, 400)
                       val base = if (pwr >= 280) 11 else 17
                       return base + Random.nextInt(0, 6)
@@ -989,7 +975,6 @@ jobs:
                       setupDnsSdDiscoveryListener()
 
                       scope.launch {
-                          // Initial short search (4..10s based on device power) to join any existing group immediately:
                           val initialSearchSec = if (getSelfPowerScore() >= 300) 4 else 9
                           enterSearchMode(initialSearchSec)
 
@@ -1016,17 +1001,14 @@ jobs:
                       val now = System.currentTimeMillis()
                       nearbyCandidates.entries.removeIf { now - it.value.seenAtMs > 14_000L }
 
-                      // Reset stuck in-flight flag if createGroup took > 5 seconds without callback
                       if (isCreatingGroupInFlight && now - createGroupStartedMs > 5000L) {
                           isCreatingGroupInFlight = false
                       }
 
-                      // Poll live group state every 2 seconds
                       if (phaseRemainingSec % 2 == 0) {
                           pollGroupState()
                       }
 
-                      // 1. If we are CONNECTED to at least one rider, pause the timer and keep the connection stable!
                       if (hasAnyConnectedPeers()) {
                           if (isGroupOwnerNow) {
                               val label = groupSsid.ifEmpty { "DIRECT-BM-BIKEMIC" }
@@ -1042,7 +1024,6 @@ jobs:
                           return
                       }
 
-                      // 2. Nobody connected yet -> run the alternating 40s Host <-> Search state machine!
                       phaseRemainingSec -= 1
 
                       when (cycleMode) {
@@ -1067,7 +1048,6 @@ jobs:
                                   }
                               }
 
-                              // If 40 seconds elapsed and NO ONE connected -> switch to SEARCHING mode!
                               if (phaseRemainingSec <= 0) {
                                   enterSearchMode(computeSearchDurationSec())
                               }
@@ -1076,7 +1056,6 @@ jobs:
                           CycleMode.SEARCHING -> {
                               onStatusChange("🔍 جاري البحث عن دراجين مفعلين للشبكة... (${phaseRemainingSec}ث)")
 
-                              // Check if we discovered a host in nearbyCandidates
                               val hostCand = nearbyCandidates.values
                                   .filter { it.isHostingGroup && it.ssid.isNotEmpty() }
                                   .maxByOrNull { it.powerScore }
@@ -1090,7 +1069,6 @@ jobs:
                                   startServiceDiscoverySweep()
                               }
 
-                              // If search window elapsed and no host was found -> activate our Hotspot for 40 seconds!
                               if (phaseRemainingSec <= 0) {
                                   enterHost40sMode()
                               }
@@ -1113,7 +1091,6 @@ jobs:
                       val mgr = p2pManager ?: return
                       val ch = channel ?: return
 
-                      // Tear down our empty hotspot group first so the radio can scan for other hosts!
                       mgr.requestGroupInfo(ch) { grp ->
                           if (grp != null && grp.clientList.isEmpty()) {
                               mgr.removeGroup(ch, object : WifiP2pManager.ActionListener {
@@ -1535,6 +1512,10 @@ jobs:
 
           # =========================================================
           # 9. MeshVoiceEngine.kt
+          #    - Adds per-rider Open-Mic Mute (`mutedOpenMicPeerIds`)
+          #    - CRITICAL SAFETY RULE:
+          #      If a rider has a noisy open mic, muting them blocks their continuous Red Open Mic (`isPttTelegram == false`),
+          #      but NEVER blocks their emergency PTT Telegram (`isPttTelegram == true`)!
           # =========================================================
           write("app/src/main/java/com/bikemic/app/MeshVoiceEngine.kt", r"""
               package com.bikemic.app
@@ -1594,8 +1575,11 @@ jobs:
                   @Volatile var userName: String = "أبو ناصر"
                   @Volatile var chainRank: Int = 1
                   @Volatile var isOpenMicOn: Boolean = false
-                  @Volatile var selectAllPeers: Boolean = true
-                  val allowedPeerIds: MutableSet<Long> = Collections.newSetFromMap(ConcurrentHashMap())
+
+                  // Per-Rider Open-Mic Mute Set:
+                  // Mutes a noisy rider's continuous Open Mic, while NEVER muting any PTT Telegram!
+                  val mutedOpenMicPeerIds: MutableSet<Long> = Collections.newSetFromMap(ConcurrentHashMap())
+                  val mutedPeersStateList = mutableStateListOf<Long>()
 
                   @Volatile private var pttActiveInternal: Boolean = false
                   @Volatile private var currentBurstId: Int = 0
@@ -1703,6 +1687,30 @@ jobs:
                       val mantissa = (sample shr (exponent + 3)) and 0x0F
                       val ulawByte = (sign or (exponent shl 4) or mantissa).inv()
                       return ulawByte.toByte()
+                  }
+
+                  fun toggleMutePeerOpenMic(nodeId: Long) {
+                      if (mutedOpenMicPeerIds.contains(nodeId)) {
+                          mutedOpenMicPeerIds.remove(nodeId)
+                          mutedPeersStateList.remove(nodeId)
+                      } else {
+                          mutedOpenMicPeerIds.add(nodeId)
+                          if (!mutedPeersStateList.contains(nodeId)) {
+                              mutedPeersStateList.add(nodeId)
+                          }
+                      }
+                  }
+
+                  fun setAllOpenMicMuted(muteAll: Boolean) {
+                      if (muteAll) {
+                          peersMap.keys.forEach { id ->
+                              mutedOpenMicPeerIds.add(id)
+                              if (!mutedPeersStateList.contains(id)) mutedPeersStateList.add(id)
+                          }
+                      } else {
+                          mutedOpenMicPeerIds.clear()
+                          mutedPeersStateList.clear()
+                      }
                   }
 
                   fun getSelfPowerScoreInt(): Int =
@@ -2235,7 +2243,6 @@ jobs:
                                       isDirect = true
                                   )
                                   peersMap[senderId] = peer
-                                  if (selectAllPeers) allowedPeerIds.add(senderId)
 
                                   val remoteHost = msg.optLong("host", -1L)
                                   val remoteEpoch = msg.optLong("epoch", 0L)
@@ -2280,7 +2287,6 @@ jobs:
                                                   handshakeOk = true,
                                                   isDirect = currentEntry?.isDirect ?: false
                                               )
-                                              if (selectAllPeers) allowedPeerIds.add(gId)
                                           }
 
                                           if (gIp.isNotEmpty() && gIp !in cachedLocalIps) {
@@ -2330,7 +2336,8 @@ jobs:
                                               if (!ackedPeerNames.contains(label)) {
                                                   ackedPeerNames.add(label)
                                               }
-                                              lastAckSummary.value = "✓ وصلت البرقية إلى (${ackedPeerNames.size}): ${ackedPeerNames.joinToString("، ")}"
+                                              val joinedNames = ackedPeerNames.joinToString("، ")
+                                              lastAckSummary.value = "✓ وصلت البرقية إلى (${ackedPeerNames.size}): $joinedNames"
                                           }
                                           playShortBeep(ToneGenerator.TONE_PROP_ACK, 70)
                                           vibrateConfirmation()
@@ -2518,7 +2525,6 @@ jobs:
                       val activePeers = peersMap.values.filter { it.handshakeOk && it.ipAddress.isNotEmpty() }
                       for (p in activePeers) {
                           if (p.ipAddress == excludeIp) continue
-                          if (!selectAllPeers && !allowedPeerIds.contains(p.nodeId) && p.nodeId != election.currentHostId && excludeIp == null) continue
                           runCatching { set.add(InetAddress.getByName(p.ipAddress)) }
                       }
                       if (set.isEmpty() || activePeers.any { !it.isDirect }) {
@@ -2616,8 +2622,16 @@ jobs:
                                       }
                                   }
 
-                                  val allowed = selectAllPeers || allowedPeerIds.contains(senderId) || senderId == election.currentHostId
-                                  if (allowed) {
+                                  // CRITICAL MUTE RULE:
+                                  // - Emergency PTT Telegram (`isPttTelegram == true`) CANNOT BE MUTED! It ALWAYS plays!
+                                  // - Continuous Red Open Mic (`isPttTelegram == false`) CAN be muted per rider if noisy!
+                                  val shouldPlay = if (isPttTelegram) {
+                                      true
+                                  } else {
+                                      !mutedOpenMicPeerIds.contains(senderId)
+                                  }
+
+                                  if (shouldPlay) {
                                       val payloadLen = (pkt.length - HEADER_SIZE).coerceAtMost(SAMPLES_PER_FRAME)
                                       for (i in 0 until payloadLen) {
                                           val uByte = pkt.data[HEADER_SIZE + i].toInt() and 0xFF
@@ -2629,7 +2643,7 @@ jobs:
                                       track.write(decodedShorts, 0, payloadLen, AudioTrack.WRITE_NON_BLOCKING)
 
                                       val name = peersMap[senderId]?.name ?: "راكب #$rank"
-                                      val modeTag = if (isPttTelegram) "⚡ برقية من" else "🎙️ يتحدث"
+                                      val modeTag = if (isPttTelegram) "⚡ برقية طارئة من" else "🎙️ يتحدث"
                                       activeSpeakerName.value = "$modeTag: $name (#$rank)"
                                       lastClearJob?.cancel()
                                       lastClearJob = scope.launch {
@@ -2742,7 +2756,10 @@ jobs:
           """)
 
           # =========================================================
-          # 10. MainActivity.kt (Organized Non-Overlapping Column Layout!)
+          # 10. MainActivity.kt
+          #    - Fixed Kotlin 1.9 string template quote syntax (no nested quotes inside ${...})
+          #    - Added instant 1-tap Mute/Unmute noisy Open-Mic per rider (both on main screen rider chips
+          #      and inside the "متصلون" dialog), while PTT Telegrams always bypass mute!
           # =========================================================
           write("app/src/main/java/com/bikemic/app/MainActivity.kt", r"""
               package com.bikemic.app
@@ -2975,6 +2992,7 @@ jobs:
                   initialRank: Int,
                   onSave: (String, Int) -> Unit
               ) {
+                  val ctx = LocalContext.current
                   var name by remember { mutableStateOf(initialName) }
                   var rank by remember { mutableIntStateOf(initialRank) }
                   var editing by remember { mutableStateOf(false) }
@@ -2984,10 +3002,9 @@ jobs:
                   var showUsers by remember { mutableStateOf(false) }
                   var showRankDlg by remember { mutableStateOf(false) }
                   var showInfo by remember { mutableStateOf(false) }
-                  var selectAll by remember { mutableStateOf(true) }
-                  val selected = remember { mutableStateListOf<Long>() }
 
                   val peers = engine.peersListState
+                  val mutedPeerIds = engine.mutedPeersStateList
                   val ver by engine.peersVersion
                   val connected by engine.connectedCount
                   val status by engine.statusText
@@ -3010,7 +3027,6 @@ jobs:
                       if (micOn) Color(0xFFFF3B30) else Color(0xFF420D0D), label = "m"
                   )
 
-                  // Clean, structured single-Column layout so ZERO elements ever overlap!
                   Column(
                       modifier = Modifier
                           .fillMaxSize()
@@ -3020,7 +3036,7 @@ jobs:
                       horizontalAlignment = Alignment.CenterHorizontally,
                       verticalArrangement = Arrangement.SpaceBetween
                   ) {
-                      // ================= 1. TOP SECTION (Header Card + Riders + Status) =================
+                      // ================= 1. TOP SECTION =================
                       Column(
                           modifier = Modifier.fillMaxWidth(),
                           horizontalAlignment = Alignment.CenterHorizontally
@@ -3090,7 +3106,7 @@ jobs:
 
                           Spacer(Modifier.height(8.dp))
 
-                          // Row 2: Organized Status Card (Rider Identity + Bluetooth + 40s Network Cycle)
+                          // Row 2: Organized Status Card
                           Column(
                               modifier = Modifier
                                   .fillMaxWidth()
@@ -3100,7 +3116,6 @@ jobs:
                                   .padding(horizontal = 12.dp, vertical = 8.dp),
                               horizontalAlignment = Alignment.CenterHorizontally
                           ) {
-                              // Editable Name + Power / Battery Badge in one clean line
                               if (editing) {
                                   Row(verticalAlignment = Alignment.CenterVertically) {
                                       OutlinedTextField(
@@ -3136,9 +3151,10 @@ jobs:
                                           Icon(Icons.Default.Edit, null, tint = Color.Gray, modifier = Modifier.size(14.dp))
                                       }
 
+                                      val leaderPrefix = if (isHost) "⭐ القائد • " else ""
+                                      val myStatsText = "${leaderPrefix}قوة ${engine.getSelfPowerScoreInt()} • 🔋${engine.batteryPct}% • ${thermalLabel(engine.thermalStatus)}"
                                       Text(
-                                          text = (if (isHost) "⭐ القائد • " else "") +
-                                              "قوة ${engine.getSelfPowerScoreInt()} • 🔋${engine.batteryPct}% • ${thermalLabel(engine.thermalStatus)}",
+                                          text = myStatsText,
                                           color = if (isHost) Color(0xFFFFD60A) else Color(0xFFAEAEB2),
                                           fontSize = 11.sp,
                                           fontWeight = FontWeight.SemiBold
@@ -3150,7 +3166,6 @@ jobs:
                               HorizontalDivider(color = Color(0xFF262629))
                               Spacer(Modifier.height(6.dp))
 
-                              // Bluetooth Route Pill
                               Row(
                                   modifier = Modifier
                                       .fillMaxWidth()
@@ -3179,7 +3194,6 @@ jobs:
 
                               Spacer(Modifier.height(4.dp))
 
-                              // 40s Auto-Hotspot / Search Cycle Line
                               Text(
                                   text = autoBanner,
                                   color = Color(0xFF32D74B),
@@ -3199,7 +3213,7 @@ jobs:
                               )
                           }
 
-                          // Row 3: Connected Riders Horizontal Strip (Only when riders are connected)
+                          // Row 3: Connected Riders Strip (Tap any rider chip to Mute/Unmute their noisy Open Mic; PTT Telegrams still come through!)
                           if (peers.isNotEmpty()) {
                               Spacer(Modifier.height(6.dp))
                               LazyRow(
@@ -3208,23 +3222,45 @@ jobs:
                               ) {
                                   items(peers, key = { it.nodeId }) { p ->
                                       val isPeerHost = p.nodeId == hostId
-                                      val didAck = ackedNames.contains("${p.name} (#${p.chainRank})")
+                                      val isPeerMuted = mutedPeerIds.contains(p.nodeId)
+                                      val peerTag = "${p.name} (#${p.chainRank})"
+                                      val didAck = ackedNames.contains(peerTag)
+                                      val leadIcon = if (isPeerHost) "⭐ " else "🏍️ "
+                                      val ackSuffix = if (didAck) " ✓" else ""
+                                      val muteSuffix = if (isPeerMuted) " 🔇" else ""
+                                      val chipText = "$leadIcon${p.name} (${p.batteryPct}%)$muteSuffix$ackSuffix"
+
                                       Row(
                                           Modifier
                                               .clip(RoundedCornerShape(14.dp))
-                                              .background(if (didAck) Color(0xFF143D1B) else Color(0xFF1C1C1E))
+                                              .background(
+                                                  if (isPeerMuted) Color(0xFF3A1212)
+                                                  else if (didAck) Color(0xFF143D1B)
+                                                  else Color(0xFF1C1C1E)
+                                              )
                                               .border(
                                                   1.dp,
-                                                  if (didAck) Color(0xFF32D74B) else if (isPeerHost) Color(0xFFFFD60A) else Color(0xFF3A3A3C),
+                                                  if (isPeerMuted) Color(0xFFFF453A)
+                                                  else if (didAck) Color(0xFF32D74B)
+                                                  else if (isPeerHost) Color(0xFFFFD60A)
+                                                  else Color(0xFF3A3A3C),
                                                   RoundedCornerShape(14.dp)
                                               )
+                                              .clickable {
+                                                  engine.toggleMutePeerOpenMic(p.nodeId)
+                                                  val nowMuted = engine.mutedOpenMicPeerIds.contains(p.nodeId)
+                                                  val msg = if (nowMuted) {
+                                                      "تم كتم مايك ${p.name} المزعج (البرقيات الطارئة منه ستظل مسموعة)"
+                                                  } else {
+                                                      "تم إلغاء كتم مايك ${p.name}"
+                                                  }
+                                                  Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
+                                              }
                                               .padding(horizontal = 10.dp, vertical = 4.dp),
                                           verticalAlignment = Alignment.CenterVertically
                                       ) {
                                           Text(
-                                              text = (if (isPeerHost) "⭐ " else "🏍️ ") +
-                                                  "${p.name} (${p.batteryPct}%)" +
-                                                  (if (didAck) " ✓" else ""),
+                                              text = chipText,
                                               color = Color.White,
                                               fontSize = 11.sp,
                                               fontWeight = FontWeight.SemiBold
@@ -3296,7 +3332,7 @@ jobs:
                               )
                               Spacer(Modifier.height(3.dp))
                               Text(
-                                  if (ptt) "تصل فوراً مع تأكيد الاستلام" else "يعمل على شاشة القفل وبزر الصوت",
+                                  if (ptt) "البرقية تتجاوز أي كتم وتصل للجميع" else "يعمل على شاشة القفل ولا يمكن كتمها",
                                   color = if (ptt) Color(0xFF222222) else Color(0xFFAEAEB2),
                                   fontSize = 11.sp
                               )
@@ -3348,6 +3384,7 @@ jobs:
                           },
                           text = {
                               Column {
+                                  val selfRoleSuffix = if (isHost) " ⭐ القائد" else ""
                                   Row(
                                       Modifier
                                           .fillMaxWidth()
@@ -3357,34 +3394,39 @@ jobs:
                                       verticalAlignment = Alignment.CenterVertically
                                   ) {
                                       Text(
-                                          "أنت: $name • قوة ${engine.getSelfPowerScoreInt()} • بطارية ${engine.batteryPct}%" +
-                                              if (isHost) " ⭐ القائد" else "",
+                                          "أنت: $name • قوة ${engine.getSelfPowerScoreInt()} • بطارية ${engine.batteryPct}%$selfRoleSuffix",
                                           color = Color(0xFFFFD60A),
                                           fontWeight = FontWeight.Bold,
                                           fontSize = 12.sp
                                       )
                                   }
                                   Spacer(Modifier.height(6.dp))
+                                  Text(
+                                      "💡 يمكنك كتم صوت المايك المفتوح لأي دراج لديه ضوضاء/هواء، بينما ستظل برقياته الطارئة مسموعة دائماً:",
+                                      color = Color(0xFFAEAEB2),
+                                      fontSize = 11.sp
+                                  )
+                                  Spacer(Modifier.height(6.dp))
                                   Row(
-                                      Modifier.fillMaxWidth().clickable {
-                                          selectAll = !selectAll
-                                          engine.selectAllPeers = selectAll
-                                          if (selectAll) peers.forEach {
-                                              if (!selected.contains(it.nodeId)) selected.add(it.nodeId)
-                                              engine.allowedPeerIds.add(it.nodeId)
-                                          }
-                                      }.padding(vertical = 4.dp),
-                                      verticalAlignment = Alignment.CenterVertically
+                                      Modifier.fillMaxWidth(),
+                                      horizontalArrangement = Arrangement.spacedBy(8.dp)
                                   ) {
-                                      Checkbox(checked = selectAll, onCheckedChange = { c ->
-                                          selectAll = c; engine.selectAllPeers = c
-                                          if (c) peers.forEach {
-                                              if (!selected.contains(it.nodeId)) selected.add(it.nodeId)
-                                              engine.allowedPeerIds.add(it.nodeId)
-                                          }
-                                      })
-                                      Text("ضم الكل في البرقيات والمكالمات", color = Color.White, fontSize = 13.sp)
+                                      OutlinedButton(
+                                          onClick = { engine.setAllOpenMicMuted(false) },
+                                          modifier = Modifier.weight(1f),
+                                          contentPadding = PaddingValues(vertical = 4.dp)
+                                      ) {
+                                          Text("سماع الكل 🔊", color = Color(0xFF32D74B), fontSize = 12.sp)
+                                      }
+                                      OutlinedButton(
+                                          onClick = { engine.setAllOpenMicMuted(true) },
+                                          modifier = Modifier.weight(1f),
+                                          contentPadding = PaddingValues(vertical = 4.dp)
+                                      ) {
+                                          Text("كتم مايك الكل 🔇", color = Color(0xFFFF453A), fontSize = 12.sp)
+                                      }
                                   }
+                                  Spacer(Modifier.height(6.dp))
                                   HorizontalDivider(color = Color.DarkGray)
                                   Spacer(Modifier.height(8.dp))
                                   if (peers.isEmpty()) {
@@ -3396,33 +3438,37 @@ jobs:
                                       LazyColumn(Modifier.heightIn(max = 280.dp)) {
                                           items(peers, key = { it.nodeId }) { p ->
                                               val isHostP = p.nodeId == hostId
-                                              val checked = selectAll || selected.contains(p.nodeId)
-                                              val acked = ackedNames.contains("${p.name} (#${p.chainRank})")
+                                              val isMuted = mutedPeerIds.contains(p.nodeId)
+                                              val peerKey = "${p.name} (#${p.chainRank})"
+                                              val acked = ackedNames.contains(peerKey)
+                                              val hostBadge = if (isHostP) " ⭐ (القائد)" else ""
+                                              val ackBadge = if (acked) " • ✓ استلم البرقية" else ""
+                                              val titleLine = "${p.name} (#${p.chainRank})$hostBadge$ackBadge"
+
                                               Row(
                                                   Modifier.fillMaxWidth().padding(vertical = 5.dp),
                                                   verticalAlignment = Alignment.CenterVertically
                                               ) {
-                                                  Checkbox(checked = checked, onCheckedChange = { c ->
-                                                      selectAll = false; engine.selectAllPeers = false
-                                                      if (c) {
-                                                          if (!selected.contains(p.nodeId)) selected.add(p.nodeId)
-                                                          engine.allowedPeerIds.add(p.nodeId)
-                                                      } else {
-                                                          selected.remove(p.nodeId)
-                                                          engine.allowedPeerIds.remove(p.nodeId)
-                                                      }
-                                                  })
+                                                  IconButton(
+                                                      onClick = { engine.toggleMutePeerOpenMic(p.nodeId) }
+                                                  ) {
+                                                      Icon(
+                                                          imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                                          contentDescription = "كتم أو تشغيل مايك الراكب",
+                                                          tint = if (isMuted) Color(0xFFFF453A) else Color(0xFF32D74B)
+                                                      )
+                                                  }
                                                   Column(Modifier.weight(1f)) {
                                                       Text(
-                                                          "${p.name} (#${p.chainRank})" +
-                                                              (if (isHostP) " ⭐ (القائد الأقوى)" else "") +
-                                                              (if (acked) " • ✓ استلم البرقية" else ""),
+                                                          titleLine,
                                                           color = if (isHostP) Color(0xFFFFD60A) else Color.White,
-                                                          fontWeight = FontWeight.Bold, fontSize = 14.sp
+                                                          fontWeight = FontWeight.Bold,
+                                                          fontSize = 14.sp
                                                       )
+                                                      val muteStateLabel = if (isMuted) "🔇 المايك مكتوم (البرقية مسموعة)" else "🔊 المايك مسموع"
                                                       Text(
-                                                          "قوة الهاتف: ${engine.getPeerPowerScoreInt(p)} • بطارية ${p.batteryPct}% • ${thermalLabel(p.thermalStatus)}",
-                                                          color = Color(0xFF32D74B),
+                                                          "$muteStateLabel • بطارية ${p.batteryPct}% • ${thermalLabel(p.thermalStatus)}",
+                                                          color = if (isMuted) Color(0xFFFF9F0A) else Color(0xFF32D74B),
                                                           fontSize = 11.sp
                                                       )
                                                   }
@@ -3430,87 +3476,101 @@ jobs:
                                           }
                                       }
                                   }
-                              },
-                              confirmButton = {
-                                  Button(
-                                      onClick = { showUsers = false },
-                                      colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F))
-                                  ) { Text("تم", color = Color.White) }
                               }
-                          )
-                      }
+                          },
+                          confirmButton = {
+                              Button(
+                                  onClick = { showUsers = false },
+                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F))
+                              ) { Text("تم", color = Color.White) }
+                          }
+                      )
+                  }
 
-                      if (showRankDlg) {
-                          AlertDialog(
-                              onDismissRequest = { showRankDlg = false },
-                              containerColor = Color(0xFF1C1C1E),
-                              title = { Text("رقمك في مجموعة الدراجين", color = Color.White) },
-                              text = {
-                                  LazyColumn(Modifier.height(280.dp)) {
-                                      items((1..12).toList()) { num ->
-                                          val label = "راكب #$num"
-                                          TextButton(
-                                              onClick = {
-                                                  rank = num; engine.updateUser(name, num); onSave(name, num)
-                                                  showRankDlg = false
-                                              },
-                                              modifier = Modifier.fillMaxWidth()
-                                          ) {
-                                              Text(label, color = if (rank == num) Color(0xFFFF453A) else Color.White,
-                                                   fontWeight = if (rank == num) FontWeight.Bold else FontWeight.Normal)
-                                          }
+                  if (showRankDlg) {
+                      AlertDialog(
+                          onDismissRequest = { showRankDlg = false },
+                          containerColor = Color(0xFF1C1C1E),
+                          title = { Text("رقمك في مجموعة الدراجين", color = Color.White) },
+                          text = {
+                              LazyColumn(Modifier.height(280.dp)) {
+                                  items((1..12).toList()) { num ->
+                                      val label = "راكب #$num"
+                                      TextButton(
+                                          onClick = {
+                                              rank = num; engine.updateUser(name, num); onSave(name, num)
+                                              showRankDlg = false
+                                          },
+                                          modifier = Modifier.fillMaxWidth()
+                                      ) {
+                                          Text(
+                                              label,
+                                              color = if (rank == num) Color(0xFFFF453A) else Color.White,
+                                              fontWeight = if (rank == num) FontWeight.Bold else FontWeight.Normal
+                                          )
                                       }
                                   }
-                              },
-                              confirmButton = {
-                                  TextButton(onClick = { showRankDlg = false }) { Text("إغلاق", color = Color.Gray) }
                               }
-                          )
-                      }
+                          },
+                          confirmButton = {
+                              TextButton(onClick = { showRankDlg = false }) { Text("إغلاق", color = Color.Gray) }
+                          }
+                      )
+                  }
 
-                      if (showInfo) {
-                          val ifaces = remember(sent, ver) { engine.getDebugInterfaces() }
-                          val bcasts = remember(sent, ver) { engine.getDebugBroadcasts() }
-                          val (gSsid, gPass) = remember(sent, ver) { engine.getAutoHotspotCredentials() }
-                          AlertDialog(
-                              onDismissRequest = { showInfo = false },
-                              containerColor = Color(0xFF1C1C1E),
-                              title = { Text("تشخيص البلوتوث والشبكة", color = Color.White, fontWeight = FontWeight.Bold) },
-                              text = {
-                                  Column(
-                                      modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
-                                      verticalArrangement = Arrangement.spacedBy(5.dp)
-                                  ) {
-                                      Text("حالة الصوت: $btRouteLabel", color = Color(0xFF5AC8FA), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                      Text("قوة هاتفك الإجمالية: ${engine.getSelfPowerScoreInt()} نقطة (مواصفات الجهاز: ${engine.hardwareSpecScore})", color = Color(0xFFFFD60A), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                      Text("القائد الحالي: ${if (isHost) "أنت ($name)" else (peers.find { it.nodeId == hostId }?.name ?: "غير معروف")}", color = Color.White, fontSize = 12.sp)
-                                      if (gSsid.isNotEmpty()) {
-                                          Text("شبكة القائد التلقائية: $gSsid (كلمة المرور: $gPass)", color = Color(0xFF32D74B), fontSize = 11.sp)
-                                      }
-                                      HorizontalDivider(color = Color.DarkGray)
-                                      Text("واجهات شبكتك:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                      if (ifaces.isEmpty()) {
-                                          Text("لا توجد واجهات نشطة!", color = Color.Red, fontSize = 12.sp)
-                                      } else {
-                                          ifaces.forEach { (ifName, ip) ->
-                                              Text("• $ifName: $ip", color = Color.White, fontSize = 12.sp)
-                                          }
-                                      }
-                                      HorizontalDivider(color = Color.DarkGray)
-                                      Text("إحصائيات:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                                      Text("• حزم أُرسلت: $sent | مستلمة: $received", color = Color.White, fontSize = 12.sp)
-                                      Text("• أقران متصلون: ${peers.size}", color = Color.White, fontSize = 12.sp)
-                                      Text("• حالة النظام: $lastErr", color = Color.White, fontSize = 11.sp)
-                                  }
-                              },
-                              confirmButton = {
-                                  Button(
-                                      onClick = { showInfo = false },
-                                      colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF32D74B))
-                                  ) { Text("فهمت", color = Color.Black) }
-                              }
-                          )
+                  if (showInfo) {
+                      val ifaces = remember(sent, ver) { engine.getDebugInterfaces() }
+                      val bcasts = remember(sent, ver) { engine.getDebugBroadcasts() }
+                      val (gSsid, gPass) = remember(sent, ver) { engine.getAutoHotspotCredentials() }
+                      val currentLeaderName = if (isHost) {
+                          "أنت ($name)"
+                      } else {
+                          peers.find { it.nodeId == hostId }?.name ?: "غير معروف"
                       }
+                      AlertDialog(
+                          onDismissRequest = { showInfo = false },
+                          containerColor = Color(0xFF1C1C1E),
+                          title = { Text("تشخيص البلوتوث والشبكة", color = Color.White, fontWeight = FontWeight.Bold) },
+                          text = {
+                              Column(
+                                  modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+                                  verticalArrangement = Arrangement.spacedBy(5.dp)
+                              ) {
+                                  Text("حالة الصوت: $btRouteLabel", color = Color(0xFF5AC8FA), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                  Text("قوة هاتفك الإجمالية: ${engine.getSelfPowerScoreInt()} نقطة (مواصفات الجهاز: ${engine.hardwareSpecScore})", color = Color(0xFFFFD60A), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                  Text("القائد الحالي: $currentLeaderName", color = Color.White, fontSize = 12.sp)
+                                  if (gSsid.isNotEmpty()) {
+                                      Text("شبكة القائد التلقائية: $gSsid (كلمة المرور: $gPass)", color = Color(0xFF32D74B), fontSize = 11.sp)
+                                  }
+                                  HorizontalDivider(color = Color.DarkGray)
+                                  Text("واجهات شبكتك:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                  if (ifaces.isEmpty()) {
+                                      Text("لا توجد واجهات نشطة!", color = Color.Red, fontSize = 12.sp)
+                                  } else {
+                                      ifaces.forEach { (ifName, ip) ->
+                                          Text("• $ifName: $ip", color = Color.White, fontSize = 12.sp)
+                                      }
+                                  }
+                                  HorizontalDivider(color = Color.DarkGray)
+                                  Text("الأهداف النشطة:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                  bcasts.forEach { b ->
+                                      Text("• $b", color = Color.White, fontSize = 11.sp)
+                                  }
+                                  HorizontalDivider(color = Color.DarkGray)
+                                  Text("إحصائيات:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                  Text("• حزم أُرسلت: $sent | مستلمة: $received", color = Color.White, fontSize = 12.sp)
+                                  Text("• أقران متصلون: ${peers.size}", color = Color.White, fontSize = 12.sp)
+                                  Text("• حالة النظام: $lastErr", color = Color.White, fontSize = 11.sp)
+                              }
+                          },
+                          confirmButton = {
+                              Button(
+                                  onClick = { showInfo = false },
+                                  colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF32D74B))
+                              ) { Text("فهمت", color = Color.Black) }
+                          }
+                      )
+                  }
               }
 
               fun thermalLabel(t: Int): String = when (t) {
@@ -3522,7 +3582,7 @@ jobs:
               }
           """)
 
-          print("BikeMic P2P Mesh project (v11 Organized UI + 40s Host/Search Cycle + BT) generated successfully.")
+          print("BikeMic P2P Mesh project (v12 Mute Noisy Mic + Unmutable PTT + 40s Auto-Cycle) generated successfully.")
           PYEOF
           python3 /tmp/gen_bikemic_p2p.py
 
