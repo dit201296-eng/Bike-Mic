@@ -1,3610 +1,674 @@
-name: Build BikeMic P2P Mesh APK (v13 Auto-Hotspot Fix + Red Mic Chat Join/Leave + PTT Music Ducking + Background Service)
-​on:
-push:
-branches: [ "main", "master" ]
-workflow_dispatch:
-​permissions:
-contents: read
-​concurrency:
-group: {{ github.workflow }}-{{ github.ref }}
-cancel-in-progress: true
-​jobs:
-build:
-runs-on: ubuntu-24.04
-timeout-minutes: 30
-​steps:
-- name: Checkout repository
-uses: actions/checkout@v4
-​- name: Clean workspace from old files
-run: |
-rm -rf app build gradle settings.gradle settings.gradle.kts build.gradle build.gradle.kts gradle.properties local.properties
-​- name: Set up JDK 17
-uses: actions/setup-java@v4
-with:
-java-version: '17'
-distribution: 'temurin'
-​- name: Set up Gradle 8.7
-uses: gradle/actions/setup-gradle@v4
-with:
-gradle-version: '8.7'
-​- name: Prepare Android SDK
-run: |
-export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-mkdir -p "$ANDROID_SDK_ROOT/licenses"
-printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
-printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-preview-license"
-echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-​- name: Generate temporary keystore (123456)
-run: |
-mkdir -p app
-keytool -genkeypair -v 
--keystore app/release.keystore 
--storetype PKCS12 
--keyalg RSA -keysize 2048 -validity 10000 
--alias bikemic 
--storepass 123456 -keypass 123456 
--dname "CN=BikeMic, OU=Riders, O=BikeMic, L=Muscat, ST=Muscat, C=OM"
-test -s app/release.keystore
-echo "Temporary keystore generated."
-​- name: Generate P2P Mesh project (v13 Auto-Hotspot Fix, Red Mic Join/Leave, PTT Music Ducking, Background Service)
-env:
-RUN_NUM: ${{ github.run_number }}
-run: |
-cat << 'PYEOF' > /tmp/gen_bikemic_p2p.py
-import os
-import textwrap
-​def write(path, content):
-os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-with open(path, "w", encoding="utf-8") as f:
-f.write(textwrap.dedent(content).lstrip())
-​run_num = int(os.environ.get("RUN_NUM", "1") or "1")
-​# =========================================================
-# 1. Gradle configuration
-# =========================================================
-write("gradle.properties", r"""
-org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
-android.useAndroidX=true
-android.nonTransitiveRClass=true
-org.gradle.parallel=true
-org.gradle.caching=true
-""")
-​write("settings.gradle", r"""
-pluginManagement {
-repositories {
-google()
-mavenCentral()
-gradlePluginPortal()
-}
-}
-dependencyResolutionManagement {
-repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-repositories {
-google()
-mavenCentral()
-}
-}
-rootProject.name = "BikeMic"
-include ':app'
-""")
-​write("build.gradle", r"""
-plugins {
-id 'com.android.application' version '8.3.2' apply false
-id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
-}
-""")
-​write("app/build.gradle", r"""
-plugins {
-id 'com.android.application'
-id 'org.jetbrains.kotlin.android'
-}
-​android {
-namespace 'com.bikemic.app'
-compileSdk 34
-​signingConfigs {
-release {
-storeFile file('release.keystore')
-storePassword '123456'
-keyAlias 'bikemic'
-keyPassword '123456'
-}
-}
-​defaultConfig {
-applicationId "com.bikemic.app"
-minSdk 26
-targetSdk 34
-versionCode VERSION_CODE
-versionName "VERSION_NAME"
-}
-​buildTypes {
-debug {
-signingConfig signingConfigs.release
-}
-release {
-signingConfig signingConfigs.release
-minifyEnabled false
-shrinkResources false
-}
-}
-​compileOptions {
-sourceCompatibility JavaVersion.VERSION_17
-targetCompatibility JavaVersion.VERSION_17
-}
-kotlinOptions { jvmTarget = '17' }
-buildFeatures { compose true }
-composeOptions { kotlinCompilerExtensionVersion = '1.5.8' }
-packaging {
-resources {
-excludes += '/META-INF/{AL2.0,LGPL2.1}'
-}
-}
-}
-​dependencies {
-implementation 'androidx.core:core-ktx:1.12.0'
-implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
-implementation 'androidx.lifecycle:lifecycle-runtime-compose:2.7.0'
-implementation 'androidx.activity:activity-compose:1.8.2'
-implementation platform('androidx.compose:compose-bom:2024.02.02')
-implementation 'androidx.compose.ui:ui'
-implementation 'androidx.compose.ui:ui-graphics'
-implementation 'androidx.compose.material3:material3'
-implementation 'androidx.compose.material:material-icons-extended'
-implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
-}
-""".replace("VERSION_CODE", str(1600 + run_num)).replace("VERSION_NAME", f"13.{run_num}"))
-​write("app/proguard-rules.pro", r"""
--keep class com.bikemic.app. { *; }
-""")
-​# =========================================================
-# 2. Resources & Icon
-# =========================================================
-write("app/src/main/res/values/strings.xml", r"""
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-<string name="app_name">BikeMic</string>
-</resources>
-""")
-​write("app/src/main/res/values/styles.xml", r"""
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-<style name="Theme.BikeMic" parent="android:Theme.Material.NoActionBar">
-<item name="android:statusBarColor">#000000</item>
-<item name="android:navigationBarColor">#000000</item>
-<item name="android:windowBackground">#000000</item>
-</style>
-</resources>
-""")
-​write("app/src/main/res/drawable/ic_launcher_background.xml", r"""
-<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
-android:width="108dp" android:height="108dp"
-android:viewportWidth="108" android:viewportHeight="108">
-<path android:fillColor="#0B0B0B" android:pathData="M0,0h108v108h-108z"/>
-<path android:fillColor="#181818" android:pathData="M54,54m-46,0a46,46 0,1 1,92 0a46,46 0,1 1,-92 0"/>
-</vector>
-""")
-​write("app/src/main/res/drawable/ic_launcher_foreground.xml", r"""
-<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
-android:width="108dp" android:height="108dp"
-android:viewportWidth="108" android:viewportHeight="108">
-<path android:fillColor="#FFFFFF" android:pathData="M51,21h6l2,5h-10z"/>
-<path android:strokeColor="#E0E0E0" android:strokeWidth="2.2" android:pathData="M44,24.5 L64,24.5"/>
-<path android:fillColor="#FFEB3B" android:pathData="M54,28m-3.2,0a3.2,3.2 0,1 1,6.4 0a3.2,3.2 0,1 1,-6.4 0"/>
-<path android:fillColor="#BDBDBD" android:pathData="M52.3,31.2h3.4v9.5h-3.4z"/>
-<path android:fillColor="#BDBDBD" android:pathData="M35,25h4l1.5,4h-7z"/>
-<path android:strokeColor="#9E9E9E" android:strokeWidth="1.7" android:pathData="M31,27.5 L43,27.5"/>
-<path android:fillColor="#FFC107" android:pathData="M37,30m-2.2,0a2.2,2.2 0,1 1,4.4 0a2.2,2.2 0,1 1,-4.4 0"/>
-<path android:fillColor="#757575" android:pathData="M35.8,32.5h2.4v7h-2.4z"/>
-<path android:fillColor="#BDBDBD" android:pathData="M69,25h4l1.5,4h-7z"/>
-<path android:strokeColor="#9E9E9E" android:strokeWidth="1.7" android:pathData="M65,27.5 L77,27.5"/>
-<path android:fillColor="#FFC107" android:pathData="M71,30m-2.2,0a2.2,2.2 0,1 1,4.4 0a2.2,2.2 0,1 1,-4.4 0"/>
-<path android:fillColor="#757575" android:pathData="M69.8,32.5h2.4v7h-2.4z"/>
-<path android:fillColor="#D32F2F" android:pathData="M54,54m-12,0a12,12 0,1 1,24 0a12,12 0,1 1,-24 0"/>
-<path android:fillColor="#FFFFFF" android:pathData="M54,47.5a2.6,2.6 0,0 1,2.6 2.6v4.2a2.6,2.6 0,0 1,-5.2 0v-4.2A2.6,2.6 0,0 1,54 47.5z"/>
-<path android:strokeColor="#FFFFFF" android:strokeWidth="1.8" android:pathData="M49.2,54a4.8,4.8 0,0 0,9.6 0M54,58.8v2.7"/>
-<path android:strokeColor="#EF5350" android:strokeWidth="2.5" android:strokeLineCap="round" android:pathData="M39,73 Q54,62 69,73"/>
-<path android:strokeColor="#FFCDD2" android:strokeWidth="2.5" android:strokeLineCap="round" android:pathData="M44.5,78.5 Q54,71 63.5,78.5"/>
-<path android:fillColor="#FFFFFF" android:pathData="M54,83.5m-2.3,0a2.3,2.3 0,1 1,4.6 0a2.3,2.3 0,1 1,-4.6 0"/>
-</vector>
-""")
-​write("app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml", r"""
-<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-<background android:drawable="@drawable/ic_launcher_background"/>
-<foreground android:drawable="@drawable/ic_launcher_foreground"/>
-</adaptive-icon>
-""")
-​write("app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml", r"""
-<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-<background android:drawable="@drawable/ic_launcher_background"/>
-<foreground android:drawable="@drawable/ic_launcher_foreground"/>
-</adaptive-icon>
-""")
-​# =========================================================
-# 3. AndroidManifest (With Foreground Service for Maps/Background)
-# =========================================================
-write("app/src/main/AndroidManifest.xml", r"""
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-​<uses-permission android:name="android.permission.INTERNET" />
-<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-<uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
-<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-<uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
-<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-<uses-permission android:name="android.permission.RECORD_AUDIO" />
-<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-<uses-permission android:name="android.permission.BLUETOOTH" />
-<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
-<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-<uses-permission android:name="android.permission.BROADCAST_STICKY" />
-<uses-permission android:name="android.permission.WAKE_LOCK" />
-<uses-permission android:name="android.permission.VIBRATE" />
-<uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
-<uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
-<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-<uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
-<uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-<uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-​<application
-android:allowBackup="true"
-android:icon="@mipmap/ic_launcher"
-android:label="@string/app_name"
-android:roundIcon="@mipmap/ic_launcher_round"
-android:supportsRtl="true"
-android:theme="@style/Theme.BikeMic">
-​<service
-android:name=".BikeMicService"
-android:enabled="true"
-android:exported="false"
-android:stopWithTask="false"
-android:foregroundServiceType="microphone|location|connectedDevice" />
-​<activity
-android:name=".MainActivity"
-android:exported="true"
-android:launchMode="singleTop"
-android:screenOrientation="portrait"
-android:showWhenLocked="true"
-android:turnScreenOn="true"
-android:showOnLockScreen="true"
-android:keepScreenOn="true">
-<intent-filter>
-<action android:name="android.intent.action.MAIN" />
-<category android:name="android.intent.category.LAUNCHER" />
-</intent-filter>
-</activity>
-</application>
-</manifest>
-""")
-​# =========================================================
-# 4. Models.kt (Includes isOpenMicOn to show if peer joined chat)
-# =========================================================
-write("app/src/main/java/com/bikemic/app/Models.kt", r"""
-package com.bikemic.app
-​data class PeerInfo(
-val nodeId: Long,
-val name: String,
-val chainRank: Int,
-val batteryPct: Int,
-val isCharging: Boolean,
-val thermalStatus: Int,
-val hardwareSpecScore: Int,
-val epoch: Long,
-val currentHostId: Long,
-val ipAddress: String,
-val lastSeenMs: Long,
-val handshakeOk: Boolean,
-val isDirect: Boolean = true,
-val isOpenMicOn: Boolean = false
-)
-""")
-​# =========================================================
-# 5. BluetoothAudioRouter.kt + PTT Music Ducking Controller
-# =========================================================
-write("app/src/main/java/com/bikemic/app/BluetoothAudioRouter.kt", r"""
-package com.bikemic.app
-​import android.annotation.SuppressLint
-import android.bluetooth.BluetoothHeadset
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.media.AudioAttributes
-import android.media.AudioDeviceCallback
-import android.media.AudioDeviceInfo
-import android.media.AudioFocusRequest
-import android.media.AudioManager
-import android.media.AudioRecord
-import android.media.AudioTrack
-import android.os.Build
-import android.os.Handler
-import android.os.Looper
-​@SuppressLint("MissingPermission")
-class BluetoothAudioRouter(
-private val context: Context,
-private val onRouteChanged: (isBtConnected: Boolean, deviceName: String, routeLabel: String) -> Unit
-) {
-private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-private val mainHandler = Handler(Looper.getMainLooper())
-​@Volatile var isBluetoothActive: Boolean = false
-private set
-@Volatile var activeBtDeviceName: String = ""
-private set
-@Volatile var forceSpeakerOverride: Boolean = false
-private set
-@Volatile var preferredBtDevice: AudioDeviceInfo? = null
-private set
-​private var deviceCallback: AudioDeviceCallback? = null
-private var btReceiver: BroadcastReceiver? = null
-​// Music Ducking state (strictly for PTT Telegrams only)
-private val duckLock = Any()
-@Volatile private var isMusicDuckedForPtt: Boolean = false
-@Volatile private var savedMusicVolume: Int = -1
-private var pttFocusRequest: AudioFocusRequest? = null
-​fun start() {
-deviceCallback = object : AudioDeviceCallback() {
-override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
-refreshAudioRoute()
-}
-override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
-refreshAudioRoute()
-}
-}
-audioManager.registerAudioDeviceCallback(deviceCallback, mainHandler)
-​val filter = IntentFilter().apply {
-addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
-addAction(BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED)
-addAction(BluetoothHeadset.ACTION_AUDIO_STATE_CHANGED)
-addAction(Intent.ACTION_HEADSET_PLUG)
-}
-btReceiver = object : BroadcastReceiver() {
-override fun onReceive(ctx: Context?, intent: Intent?) {
-val act = intent?.action ?: return
-if (act == AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED) {
-val state = intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, -1)
-if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED && !forceSpeakerOverride) {
-@Suppress("DEPRECATION")
-audioManager.isBluetoothScoOn = true
-@Suppress("DEPRECATION")
-audioManager.isSpeakerphoneOn = false
-notifyCurrentState()
-}
-} else {
-mainHandler.postDelayed({ refreshAudioRoute() }, 400L)
-}
-}
-}
-runCatching { context.registerReceiver(btReceiver, filter) }
-​refreshAudioRoute()
-}
-​/
-* Automatically lowers background music volume ONLY during PTT Telegram (sending or receiving),
-* and restores the exact previous music volume immediately when the PTT Telegram ends.
-*/
-fun setPttMusicDucking(active: Boolean) {
-synchronized(duckLock) {
-if (active && !isMusicDuckedForPtt) {
-isMusicDuckedForPtt = true
-runCatching {
-// 1. Request Android transient may-duck focus so music players lower volume without pausing
-val attrs = AudioAttributes.Builder()
-.setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
-.setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-.build()
-val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-.setAudioAttributes(attrs)
-.setWillPauseWhenDucked(false)
-.setOnAudioFocusChangeListener { }
-.build()
-pttFocusRequest = req
-audioManager.requestAudioFocus(req)
-​// 2. Also scale STREAM_MUSIC volume down to ~22% so even players that ignore focus ducking lower cleanly
-val currentVol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
-val duckTarget = ((maxVol * 22) / 100).coerceAtLeast(1)
-if (currentVol > duckTarget) {
-savedMusicVolume = currentVol
-audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, duckTarget, 0)
-} else {
-savedMusicVolume = -1
-}
-}
-} else if (!active && isMusicDuckedForPtt) {
-isMusicDuckedForPtt = false
-runCatching {
-if (savedMusicVolume > 0) {
-audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, savedMusicVolume, 0)
-}
-savedMusicVolume = -1
-pttFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-pttFocusRequest = null
-}
-}
-}
-}
-​fun toggleSpeakerOrBluetooth() {
-forceSpeakerOverride = !forceSpeakerOverride
-refreshAudioRoute()
-}
-​private fun isBluetoothCommType(type: Int): Boolean {
-if (type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO) return true
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-if (type == AudioDeviceInfo.TYPE_BLE_HEADSET || type == AudioDeviceInfo.TYPE_BLE_SPEAKER) return true
-}
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-if (type == AudioDeviceInfo.TYPE_BLE_BROADCAST) return true
-}
-return false
-}
-​private fun isWiredHeadsetType(type: Int): Boolean {
-return type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
-type == AudioDeviceInfo.TYPE_USB_HEADSET
-}
-​private fun findBestBluetoothDevice(): AudioDeviceInfo? {
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-runCatching {
-val commDevs = audioManager.availableCommunicationDevices
-val btComm = commDevs.firstOrNull { isBluetoothCommType(it.type) }
-if (btComm != null) return btComm
-}
-}
-val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-val btScoOrBle = outputs.firstOrNull { isBluetoothCommType(it.type) }
-if (btScoOrBle != null) return btScoOrBle
-​val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-val btInput = inputs.firstOrNull { isBluetoothCommType(it.type) }
-if (btInput != null) return btInput
-​return outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
-}
-​private fun findWiredHeadsetDevice(): AudioDeviceInfo? {
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-runCatching {
-val commDevs = audioManager.availableCommunicationDevices
-val wired = commDevs.firstOrNull { isWiredHeadsetType(it.type) }
-if (wired != null) return wired
-}
-}
-val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-return outputs.firstOrNull { isWiredHeadsetType(it.type) }
-}
-​fun refreshAudioRoute() {
-runCatching {
-val btDevice = findBestBluetoothDevice()
-val wiredDevice = findWiredHeadsetDevice()
-​if (btDevice != null && !forceSpeakerOverride) {
-audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-preferredBtDevice = btDevice
-val devName = btDevice.productName?.toString()?.takeIf { it.isNotBlank() } ?: "سماعة بلوتوث"
-activeBtDeviceName = devName
-isBluetoothActive = true
-​@Suppress("DEPRECATION")
-audioManager.isSpeakerphoneOn = false
-​if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-runCatching {
-val commDevs = audioManager.availableCommunicationDevices
-val targetComm = commDevs.firstOrNull { isBluetoothCommType(it.type) } ?: btDevice
-audioManager.setCommunicationDevice(targetComm)
-}
-}
-​@Suppress("DEPRECATION")
-runCatching {
-if (!audioManager.isBluetoothScoOn) {
-audioManager.startBluetoothSco()
-audioManager.isBluetoothScoOn = true
-}
-}
-​notifyCurrentState()
-} else if (wiredDevice != null && !forceSpeakerOverride) {
-audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-preferredBtDevice = wiredDevice
-val devName = wiredDevice.productName?.toString()?.takeIf { it.isNotBlank() } ?: "سماعة سلكية"
-activeBtDeviceName = devName
-isBluetoothActive = true
-​@Suppress("DEPRECATION")
-runCatching {
-if (audioManager.isBluetoothScoOn) {
-audioManager.isBluetoothScoOn = false
-audioManager.stopBluetoothSco()
-}
-audioManager.isSpeakerphoneOn = false
-}
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-runCatching { audioManager.setCommunicationDevice(wiredDevice) }
-}
-onRouteChanged(true, devName, "🎧 سماعة متصلة: $devName")
-} else {
-preferredBtDevice = null
-isBluetoothActive = false
-activeBtDeviceName = ""
-​@Suppress("DEPRECATION")
-runCatching {
-if (audioManager.isBluetoothScoOn) {
-audioManager.isBluetoothScoOn = false
-audioManager.stopBluetoothSco()
-}
-}
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-runCatching { audioManager.clearCommunicationDevice() }
-}
-audioManager.mode = AudioManager.MODE_NORMAL
-@Suppress("DEPRECATION")
-audioManager.isSpeakerphoneOn = true
-​val label = if (btDevice != null && forceSpeakerOverride) {
-"🔊 مضخم الهاتف (اضغط للتحويل للبلوتوث)"
-} else {
-"🔊 مضخم الهاتف (وصّل بلوتوث للتحويل التلقائي)"
-}
-onRouteChanged(false, "", label)
-}
-}
-}
-​fun bindAudioTrackToPreferredDevice(track: AudioTrack) {
-runCatching {
-val pref = preferredBtDevice
-if (pref != null && !forceSpeakerOverride) {
-track.preferredDevice = pref
-} else {
-track.preferredDevice = null
-}
-}
-}
-​fun bindAudioRecordToPreferredDevice(recorder: AudioRecord) {
-runCatching {
-if (!forceSpeakerOverride && isBluetoothActive) {
-val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-val btMic = inputs.firstOrNull { isBluetoothCommType(it.type) || isWiredHeadsetType(it.type) }
-?: preferredBtDevice
-if (btMic != null) {
-recorder.preferredDevice = btMic
-}
-} else {
-recorder.preferredDevice = null
-}
-}
-}
-​private fun notifyCurrentState() {
-val name = activeBtDeviceName.ifBlank { "سماعة بلوتوث" }
-onRouteChanged(true, name, "🎧 بلوتوث متصل: $name")
-}
-​fun stop() {
-setPttMusicDucking(false)
-runCatching { deviceCallback?.let { audioManager.unregisterAudioDeviceCallback(it) } }
-runCatching { btReceiver?.let { context.unregisterReceiver(it) } }
-runCatching {
-@Suppress("DEPRECATION")
-if (audioManager.isBluetoothScoOn) {
-audioManager.isBluetoothScoOn = false
-audioManager.stopBluetoothSco()
-}
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-audioManager.clearCommunicationDevice()
-}
-audioManager.mode = AudioManager.MODE_NORMAL
-}
-}
-}
-""")
-​# =========================================================
-# 6. DeviceHealthMonitor.kt
-# =========================================================
-write("app/src/main/java/com/bikemic/app/DeviceHealthMonitor.kt", r"""
-package com.bikemic.app
-​import android.app.ActivityManager
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.os.BatteryManager
-import android.os.Build
-import android.os.PowerManager
-​class DeviceHealthMonitor(
-private val context: Context,
-private val onUpdate: (batteryPct: Int, isCharging: Boolean, thermal: Int) -> Unit
-) {
-companion object {
-const val THERMAL_NONE = 0
-const val THERMAL_LIGHT = 1
-const val THERMAL_MODERATE = 2
-const val THERMAL_SEVERE = 3
-const val THERMAL_CRITICAL = 4
-​fun computeHardwareSpecScore(context: Context): Int {
-return runCatching {
-val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-val memInfo = ActivityManager.MemoryInfo()
-am.getMemoryInfo(memInfo)
-val ramGb = (memInfo.totalMem / (1024L * 1024L * 1024L)).toInt().coerceIn(1, 24)
-val cores = Runtime.getRuntime().availableProcessors().coerceIn(2, 16)
-val sdkBonus = (Build.VERSION.SDK_INT - 26).coerceIn(0, 10)
-(ramGb * 2) + cores + sdkBonus
-}.getOrDefault(20)
-}
-}
-​@Volatile var batteryPct: Int = 100
-private set
-@Volatile var isCharging: Boolean = false
-private set
-@Volatile var thermalStatus: Int = THERMAL_NONE
-private set
-​val hardwareSpecScore: Int = computeHardwareSpecScore(context)
-​private var batteryReceiver: BroadcastReceiver? = null
-private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
-private var powerManager: PowerManager? = null
-​fun start() {
-batteryReceiver = object : BroadcastReceiver() {
-override fun onReceive(ctx: Context?, intent: Intent?) {
-intent ?: return
-val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
-if (level < 0 || scale <= 0) return
-batteryPct = (level * 100f / scale).toInt()
-val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-isCharging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-status == BatteryManager.BATTERY_STATUS_FULL
-onUpdate(batteryPct, isCharging, thermalStatus)
-}
-}
-context.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-​if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-thermalListener = PowerManager.OnThermalStatusChangedListener { sys ->
-thermalStatus = mapSysThermal(sys)
-onUpdate(batteryPct, isCharging, thermalStatus)
-}
-powerManager?.addThermalStatusListener(context.mainExecutor, thermalListener!!)
-}
-}
-​private fun mapSysThermal(sys: Int): Int = when (sys) {
-PowerManager.THERMAL_STATUS_NONE -> THERMAL_NONE
-PowerManager.THERMAL_STATUS_LIGHT -> THERMAL_LIGHT
-PowerManager.THERMAL_STATUS_MODERATE -> THERMAL_MODERATE
-PowerManager.THERMAL_STATUS_SEVERE -> THERMAL_SEVERE
-else -> THERMAL_CRITICAL
-}
-​fun stop() {
-runCatching { batteryReceiver?.let { context.unregisterReceiver(it) } }
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-runCatching {
-thermalListener?.let { powerManager?.removeThermalStatusListener(it) }
-}
-}
-}
-}
-""")
-​# =========================================================
-# 7. LeaderElection.kt
-# =========================================================
-write("app/src/main/java/com/bikemic/app/LeaderElection.kt", r"""
-package com.bikemic.app
-​class LeaderElection(
-private val selfId: Long,
-private val minHealthyBattery: Int = 30,
-private val thermalHoldMs: Long = 10_000L
-) {
-@Volatile var currentHostId: Long = selfId
-private set
-@Volatile var currentEpoch: Long = 0L
-private set
-​private var thermalHighSinceMs: Long = 0L
-private var lowBatSinceMs: Long = 0L
-​fun devicePowerScore(bat: Int, chg: Boolean, thermal: Int, hwScore: Int): Double {
-if (thermal >= DeviceHealthMonitor.THERMAL_CRITICAL) return -1000.0
-var score = (bat * 1.5) + hwScore.toDouble()
-if (bat >= minHealthyBattery || chg) {
-score += 200.0
-}
-if (chg) {
-score += 35.0
-}
-when (thermal) {
-DeviceHealthMonitor.THERMAL_SEVERE -> score -= 120.0
-DeviceHealthMonitor.THERMAL_MODERATE -> score -= 45.0
-DeviceHealthMonitor.THERMAL_LIGHT -> score -= 15.0
-}
-return score
-}
-​fun peerPowerScore(p: PeerInfo): Double =
-devicePowerScore(p.batteryPct, p.isCharging, p.thermalStatus, p.hardwareSpecScore)
-​fun findReplacementIfShouldStepDown(
-selfPeer: PeerInfo,
-peers: Collection<PeerInfo>,
-nowMs: Long
-): Pair<PeerInfo, String>? {
-if (currentHostId != selfId) return null
-val activePeers = peers.filter { it.handshakeOk }
-if (activePeers.isEmpty()) return null
-​if (selfPeer.thermalStatus >= DeviceHealthMonitor.THERMAL_SEVERE) {
-if (thermalHighSinceMs == 0L) thermalHighSinceMs = nowMs
-if (nowMs - thermalHighSinceMs >= thermalHoldMs) {
-val coolerPeers = activePeers.filter { it.thermalStatus < selfPeer.thermalStatus }
-val bestCooler = coolerPeers.maxWithOrNull(
-compareBy<PeerInfo> { peerPowerScore(it) }.thenBy { -it.nodeId }
-)
-if (bestCooler != null) {
-thermalHighSinceMs = 0L
-return bestCooler to "حرارة الهاتف مرتفعة"
-}
-}
-} else {
-thermalHighSinceMs = 0L
-}
-​val isSelfBelow30 = selfPeer.batteryPct < minHealthyBattery && !selfPeer.isCharging
-if (isSelfBelow30) {
-if (lowBatSinceMs == 0L) lowBatSinceMs = nowMs
-if (nowMs - lowBatSinceMs >= 4_000L) {
-val healthyPeersAbove30 = activePeers.filter {
-(it.batteryPct >= minHealthyBattery || it.isCharging) &&
-it.thermalStatus < DeviceHealthMonitor.THERMAL_SEVERE
-}
-val bestHealthy = healthyPeersAbove30.maxWithOrNull(
-compareBy<PeerInfo> { peerPowerScore(it) }.thenBy { -it.nodeId }
-)
-if (bestHealthy != null) {
-lowBatSinceMs = 0L
-return bestHealthy to "البطارية أقل من 30%"
-}
-}
-} else {
-lowBatSinceMs = 0L
-}
-​return null
-}
-​fun pickBestLeader(selfPeer: PeerInfo, peers: Collection<PeerInfo>, excludeId: Long = -1L): PeerInfo? {
-val all = ArrayList<PeerInfo>(peers.size + 1)
-all.add(selfPeer)
-all.addAll(peers.filter { it.handshakeOk })
-return all
-.asSequence()
-.filter { it.nodeId != excludeId }
-.filter { it.thermalStatus < DeviceHealthMonitor.THERMAL_CRITICAL }
-.sortedWith(
-compareByDescending<PeerInfo> { peerPowerScore(it) }
-.thenBy { it.chainRank }
-.thenBy { it.nodeId }
-)
-.firstOrNull()
-}
-​fun acceptHostAnnouncement(hostId: Long, epoch: Long): Boolean {
-if (epoch > currentEpoch ||
-(epoch == currentEpoch && hostId < currentHostId)) {
-currentHostId = hostId
-currentEpoch = epoch
-return true
-}
-return false
-}
-​fun forceSetHost(hostId: Long, epoch: Long) {
-currentHostId = hostId
-currentEpoch = maxOf(currentEpoch, epoch)
-}
-​fun declareSelfAsHost(minEpoch: Long = currentEpoch): Pair<Long, Long> {
-currentHostId = selfId
-currentEpoch = maxOf(currentEpoch, minEpoch) + 1L
-return selfId to currentEpoch
-}
-}
-""")
-​# =========================================================
-# 8. AutoMeshHotspotManager.kt
-#    - Fixed automatic hotspot creation (no wlan1 false exit, proper removeGroup/stopDiscovery sequencing,
-#      Config Builder first on Android 10+, GPS location state check, no premature pollGroupState reset)
-# =========================================================
-write("app/src/main/java/com/bikemic/app/AutoMeshHotspotManager.kt", r"""
-package com.bikemic.app
-​import android.annotation.SuppressLint
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.location.LocationManager
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
-import android.net.wifi.WifiConfiguration
-import android.net.wifi.WifiManager
-import android.net.wifi.WifiNetworkSpecifier
-import android.net.wifi.WpsInfo
-import android.net.wifi.p2p.WifiP2pConfig
-import android.net.wifi.p2p.WifiP2pDevice
-import android.net.wifi.p2p.WifiP2pInfo
-import android.net.wifi.p2p.WifiP2pManager
-import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
-import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
-import android.os.Build
-import android.os.Looper
-import kotlinx.coroutines.*
-import java.net.Inet4Address
-import java.net.NetworkInterface
-import java.util.concurrent.ConcurrentHashMap
-import kotlin.random.Random
-​@SuppressLint("MissingPermission")
-class AutoMeshHotspotManager(
-private val context: Context,
-private val selfId: Long,
-private val getSelfPowerScore: () -> Int,
-private val getActiveUdpPeerCount: () -> Int,
-private val onStatusChange: (String) -> Unit,
-private val onTopologyChanged: (goIp: String?) -> Unit,
-private val onElectLeaderFromP2p: (leaderNodeId: Long) -> Unit
-) {
-data class DiscoveredP2pCandidate(
-val nodeId: Long,
-val powerScore: Int,
-val isHostingGroup: Boolean,
-val ssid: String,
-val pass: String,
-val device: WifiP2pDevice?,
-val seenAtMs: Long
-)
-​private enum class CycleMode {
-HOSTING_40S,
-SEARCHING
-}
-​companion object {
-private const val HOST_DURATION_SEC = 40
-}
-​private val p2pManager: WifiP2pManager? =
-context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
-private var channel: WifiP2pManager.Channel? = null
-private var receiver: BroadcastReceiver? = null
-private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-​@Volatile var isGroupOwnerNow: Boolean = false
-private set
-@Volatile var isConnectedNow: Boolean = false
-private set
-@Volatile var groupClientCount: Int = 0
-private set
-@Volatile var groupSsid: String = ""
-private set
-@Volatile var groupPass: String = ""
-private set
-@Volatile var groupOwnerIp: String? = null
-private set
-​@Volatile private var cycleMode: CycleMode = CycleMode.HOSTING_40S
-@Volatile private var phaseRemainingSec: Int = HOST_DURATION_SEC
-@Volatile private var lastConnectAttemptMs: Long = 0L
-@Volatile private var isCreatingGroupInFlight: Boolean = false
-@Volatile private var createGroupStartedMs: Long = 0L
-@Volatile private var activeNetCallback: ConnectivityManager.NetworkCallback? = null
-private var localServiceInfo: WifiP2pDnsSdServiceInfo? = null
-@Volatile private var startedLoop: Boolean = false
-​private val nearbyCandidates = ConcurrentHashMap<Long, DiscoveredP2pCandidate>()
-​fun isLocationEnabledOnDevice(): Boolean {
-return runCatching {
-val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-lm.isLocationEnabled
-} else {
-lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
-lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
-}
-}.getOrDefault(true)
-}
-​private fun isSystemMobileHotspotActive(): Boolean {
-runCatching {
-val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-val m = wifi.javaClass.getDeclaredMethod("isWifiApEnabled")
-m.isAccessible = true
-if (m.invoke(wifi) as? Boolean == true) return true
-}
-runCatching {
-val ifaces = NetworkInterface.getNetworkInterfaces()
-while (ifaces != null && ifaces.hasMoreElements()) {
-val nif = ifaces.nextElement()
-if (!nif.isUp || nif.isLoopback) continue
-val n = nif.name.lowercase()
-// Removed n == "wlan1" false positive on Dual-WiFi devices
-if (n.startsWith("ap") || n.startsWith("swlan") || n.startsWith("softap")) {
-for (ia in nif.interfaceAddresses) {
-if (ia.address is Inet4Address && !ia.address.isLoopbackAddress) return true
-}
-}
-}
-}
-return false
-}
-​private fun detectActiveP2pInterfaceIp(): String? {
-runCatching {
-val ifaces = NetworkInterface.getNetworkInterfaces()
-while (ifaces != null && ifaces.hasMoreElements()) {
-val nif = ifaces.nextElement()
-if (!nif.isUp || nif.isLoopback) continue
-val n = nif.name.lowercase()
-if (n.contains("p2p")) {
-for (ia in nif.interfaceAddresses) {
-val addr = ia.address
-if (addr is Inet4Address && !addr.isLoopbackAddress) {
-return addr.hostAddress
-}
-}
-}
-}
-}
-return null
-}
-​private fun computeSearchDurationSec(): Int {
-val pwr = getSelfPowerScore().coerceIn(50, 400)
-val base = if (pwr >= 280) 10 else 15
-return base + Random.nextInt(0, 5)
-}
-​fun start() {
-runCatching {
-val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-@Suppress("DEPRECATION")
-if (!wifi.isWifiEnabled) {
-wifi.isWifiEnabled = true
-}
-}
-​val mgr = p2pManager ?: return
-if (channel == null) {
-channel = mgr.initialize(context, Looper.getMainLooper(), null)
-registerP2pReceiver()
-setupDnsSdDiscoveryListener()
-}
-​if (startedLoop) return
-startedLoop = true
-​scope.launch {
-// Start immediately by checking if a leader already exists for 3s, then immediately create 40s Hotspot!
-enterSearchMode(3)
-​while (isActive) {
-runCatching { tickCycleSecond() }
-delay(1000L)
-}
-}
-}
-​fun ensureRunningAndRetryIfNeeded() {
-if (!startedLoop) {
-start()
-} else if (!isGroupOwnerNow && !isConnectedNow && !isCreatingGroupInFlight) {
-enterHost40sMode()
-}
-}
-​private fun hasAnyConnectedPeers(): Boolean {
-if (getActiveUdpPeerCount() > 0) return true
-if (isGroupOwnerNow && groupClientCount > 0) return true
-if (isConnectedNow && !isGroupOwnerNow) return true
-return false
-}
-​private fun tickCycleSecond() {
-if (isSystemMobileHotspotActive()) {
-onStatusChange("✓ نقطة اتصال الهاتف نشطة • الربط المباشر جاهز")
-return
-}
-​if (!isLocationEnabledOnDevice()) {
-onStatusChange("⚠️ يرجى تفعيل الموقع (GPS) من الإشعارات لإنشاء نقطة الاتصال تلقائياً")
-}
-​val now = System.currentTimeMillis()
-nearbyCandidates.entries.removeIf { now - it.value.seenAtMs > 14_000L }
-​if (isCreatingGroupInFlight && now - createGroupStartedMs > 7000L) {
-isCreatingGroupInFlight = false
-}
-​if (!isCreatingGroupInFlight && phaseRemainingSec % 2 == 0) {
-pollGroupState()
-}
-​if (hasAnyConnectedPeers()) {
-if (isGroupOwnerNow) {
-val label = groupSsid.ifEmpty { "DIRECT-BM-BIKEMIC" }
-onStatusChange("✓ نقطة الاتصال نشطة ومتصلة ($label)")
-if (phaseRemainingSec % 4 == 0) {
-advertisePresenceAndGroup()
-p2pManager?.discoverPeers(channel, null)
-}
-} else {
-val label = groupSsid.ifEmpty { "شبكة القائد" }
-onStatusChange("✓ متصل تلقائياً بـ ($label)")
-}
-return
-}
-​phaseRemainingSec -= 1
-​when (cycleMode) {
-CycleMode.HOSTING_40S -> {
-val p2pIp = detectActiveP2pInterfaceIp()
-if (p2pIp == "192.168.49.1") {
-isGroupOwnerNow = true
-isConnectedNow = true
-}
-​if (isGroupOwnerNow) {
-val ssidLabel = groupSsid.ifEmpty { "DIRECT-BM-BIKEMIC" }
-onStatusChange("📡 نقطة الاتصال مفعّلة (ssidLabel) • بانتظار دراجين ({phaseRemainingSec}ث)")
-if (phaseRemainingSec % 5 == 0) {
-advertisePresenceAndGroup()
-p2pManager?.discoverPeers(channel, null)
-}
-} else {
-if (isLocationEnabledOnDevice()) {
-onStatusChange("جاري تفعيل نقطة الاتصال التلقائية... (${phaseRemainingSec}ث)")
-}
-if (!isCreatingGroupInFlight && phaseRemainingSec % 4 == 0) {
-startAutonomousHostGroup()
-}
-}
-​if (phaseRemainingSec <= 0) {
-enterSearchMode(computeSearchDurationSec())
-}
-}
-​CycleMode.SEARCHING -> {
-onStatusChange("🔍 جاري البحث عن دراجين مفعلين للشبكة... (${phaseRemainingSec}ث)")
-​val hostCand = nearbyCandidates.values
-.filter { it.isHostingGroup && it.ssid.isNotEmpty() }
-.maxByOrNull { it.powerScore }
-​if (hostCand != null && now - lastConnectAttemptMs > 4000L) {
-lastConnectAttemptMs = now
-onStatusChange("تم العثور على (${hostCand.ssid}) • جاري الاتصال التلقائي...")
-onElectLeaderFromP2p(hostCand.nodeId)
-connectToDiscoveredLeader(hostCand.device, hostCand.ssid, hostCand.pass)
-} else if (phaseRemainingSec % 3 == 0) {
-startServiceDiscoverySweep()
-}
-​if (phaseRemainingSec <= 0) {
-enterHost40sMode()
-}
-}
-}
-}
-​private fun enterHost40sMode() {
-cycleMode = CycleMode.HOSTING_40S
-phaseRemainingSec = HOST_DURATION_SEC
-onElectLeaderFromP2p(selfId)
-startAutonomousHostGroup()
-}
-​private fun enterSearchMode(durationSec: Int) {
-cycleMode = CycleMode.SEARCHING
-phaseRemainingSec = durationSec
-isCreatingGroupInFlight = false
-​val mgr = p2pManager ?: return
-val ch = channel ?: return
-​mgr.requestGroupInfo(ch) { grp ->
-if (grp != null && grp.clientList.isEmpty()) {
-mgr.removeGroup(ch, object : WifiP2pManager.ActionListener {
-override fun onSuccess() {
-isGroupOwnerNow = false
-isConnectedNow = false
-groupClientCount = 0
-groupSsid = ""
-groupPass = ""
-advertisePresenceAndGroup()
-startServiceDiscoverySweep()
-}
-override fun onFailure(reason: Int) {
-startServiceDiscoverySweep()
-}
-})
-} else {
-advertisePresenceAndGroup()
-startServiceDiscoverySweep()
-}
-}
-}
-​private fun pollGroupState() {
-val mgr = p2pManager ?: return
-val ch = channel ?: return
-mgr.requestGroupInfo(ch) { group ->
-if (group != null) {
-isCreatingGroupInFlight = false
-isConnectedNow = true
-isGroupOwnerNow = group.isGroupOwner
-groupClientCount = group.clientList?.size ?: 0
-groupSsid = group.networkName ?: "DIRECT-BM-BIKEMIC"
-groupPass = group.passphrase ?: "bikemic1234"
-if (group.isGroupOwner) {
-groupOwnerIp = "192.168.49.1"
-advertisePresenceAndGroup()
-onTopologyChanged("192.168.49.1")
-} else {
-onTopologyChanged(groupOwnerIp ?: "192.168.49.1")
-}
-} else if (!isCreatingGroupInFlight) {
-if (detectActiveP2pInterfaceIp() == null) {
-isConnectedNow = false
-isGroupOwnerNow = false
-groupClientCount = 0
-}
-}
-}
-}
-​fun promoteToHostNow() {
-scope.launch {
-if (!isSystemMobileHotspotActive()) {
-enterHost40sMode()
-}
-}
-}
-​fun stepDownHostGroupNow() {
-scope.launch {
-enterSearchMode(18)
-}
-}
-​private fun startAutonomousHostGroup() {
-if (isSystemMobileHotspotActive() || isCreatingGroupInFlight) return
-val mgr = p2pManager ?: return
-val ch = channel ?: return
-​isCreatingGroupInFlight = true
-createGroupStartedMs = System.currentTimeMillis()
-​scope.launch {
-runCatching { mgr.stopPeerDiscovery(ch, null) }
-runCatching { mgr.clearServiceRequests(ch, null) }
-delay(400L)
-​mgr.requestGroupInfo(ch) { existing ->
-if (existing != null) {
-isCreatingGroupInFlight = false
-isGroupOwnerNow = existing.isGroupOwner
-isConnectedNow = true
-groupClientCount = existing.clientList?.size ?: 0
-groupSsid = existing.networkName ?: "DIRECT-BM-BIKEMIC"
-groupPass = existing.passphrase ?: "bikemic1234"
-groupOwnerIp = "192.168.49.1"
-advertisePresenceAndGroup()
-mgr.discoverPeers(ch, null)
-onTopologyChanged("192.168.49.1")
-return@requestGroupInfo
-}
-​doCreateGroupCleanly(mgr, ch)
-}
-}
-}
-​private fun doCreateGroupCleanly(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-val cfg = WifiP2pConfig.Builder()
-.setNetworkName("DIRECT-BM-BIKEMIC")
-.setPassphrase("bikemic1234")
-.enablePersistentMode(true)
-.setGroupOperatingBand(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ)
-.build()
-mgr.createGroup(ch, cfg, object : WifiP2pManager.ActionListener {
-override fun onSuccess() {
-isCreatingGroupInFlight = false
-queryAndAdvertiseGroup()
-}
-override fun onFailure(reason: Int) {
-scope.launch {
-runCatching { mgr.removeGroup(ch, null) }
-delay(500L)
-mgr.createGroup(ch, object : WifiP2pManager.ActionListener {
-override fun onSuccess() {
-isCreatingGroupInFlight = false
-queryAndAdvertiseGroup()
-}
-override fun onFailure(r2: Int) {
-isCreatingGroupInFlight = false
-queryAndAdvertiseGroup()
-}
-})
-}
-}
-})
-} else {
-mgr.createGroup(ch, object : WifiP2pManager.ActionListener {
-override fun onSuccess() {
-isCreatingGroupInFlight = false
-queryAndAdvertiseGroup()
-}
-override fun onFailure(reason: Int) {
-isCreatingGroupInFlight = false
-queryAndAdvertiseGroup()
-}
-})
-}
-}
-​private fun queryAndAdvertiseGroup() {
-val mgr = p2pManager ?: return
-val ch = channel ?: return
-scope.launch {
-repeat(4) {
-delay(400L)
-var ok = false
-mgr.requestGroupInfo(ch) { group ->
-if (group != null) {
-ok = true
-isGroupOwnerNow = group.isGroupOwner
-isConnectedNow = true
-groupClientCount = group.clientList?.size ?: 0
-groupSsid = group.networkName ?: "DIRECT-BM-BIKEMIC"
-groupPass = group.passphrase ?: "bikemic1234"
-groupOwnerIp = "192.168.49.1"
-advertisePresenceAndGroup()
-mgr.discoverPeers(ch, null)
-onTopologyChanged("192.168.49.1")
-}
-}
-if (ok || isGroupOwnerNow) return@launch
-}
-}
-}
-​private fun advertisePresenceAndGroup() {
-if (isSystemMobileHotspotActive()) return
-val mgr = p2pManager ?: return
-val ch = channel ?: return
-runCatching {
-localServiceInfo?.let { mgr.removeLocalService(ch, it, null) }
-val record = mapOf(
-"id" to selfId.toString(),
-"pwr" to getSelfPowerScore().toString(),
-"go" to if (isGroupOwnerNow && groupSsid.isNotEmpty()) "1" else "0",
-"ssid" to groupSsid,
-"pass" to groupPass,
-"goip" to "192.168.49.1"
-)
-val info = WifiP2pDnsSdServiceInfo.newInstance("_bikemic", "_udp", record)
-localServiceInfo = info
-mgr.addLocalService(ch, info, null)
-}
-}
-​private fun setupDnsSdDiscoveryListener() {
-val mgr = p2pManager ?: return
-val ch = channel ?: return
-​val txtListener = WifiP2pManager.DnsSdTxtRecordListener { fullDomain, record, device ->
-if (!fullDomain.contains("_bikemic")) return@DnsSdTxtRecordListener
-val remoteId = record["id"]?.toLongOrNull() ?: return@DnsSdTxtRecordListener
-if (remoteId == selfId) return@DnsSdTxtRecordListener
-​val remotePwr = record["pwr"]?.toIntOrNull() ?: 100
-val remoteIsGo = record["go"] == "1"
-val ssid = record["ssid"] ?: ""
-val pass = record["pass"] ?: ""
-val goIp = record["goip"] ?: "192.168.49.1"
-val now = System.currentTimeMillis()
-​nearbyCandidates[remoteId] = DiscoveredP2pCandidate(
-nodeId = remoteId,
-powerScore = remotePwr,
-isHostingGroup = remoteIsGo,
-ssid = ssid,
-pass = pass,
-device = device,
-seenAtMs = now
-)
-​if (!isGroupOwnerNow && !isConnectedNow && remoteIsGo && ssid.isNotEmpty()) {
-if (now - lastConnectAttemptMs >= 4000L) {
-lastConnectAttemptMs = now
-groupOwnerIp = goIp
-onElectLeaderFromP2p(remoteId)
-onStatusChange("تم العثور على شبكة ($ssid) • جاري الربط التلقائي...")
-connectToDiscoveredLeader(device, ssid, pass)
-}
-}
-}
-​val servListener = WifiP2pManager.DnsSdServiceResponseListener { _, _, _ -> }
-mgr.setDnsSdResponseListeners(ch, servListener, txtListener)
-}
-​private fun startServiceDiscoverySweep() {
-if (isSystemMobileHotspotActive() || isCreatingGroupInFlight) return
-val mgr = p2pManager ?: return
-val ch = channel ?: return
-​runCatching {
-mgr.clearServiceRequests(ch, object : WifiP2pManager.ActionListener {
-override fun onSuccess() {
-val req = WifiP2pDnsSdServiceRequest.newInstance()
-mgr.addServiceRequest(ch, req, object : WifiP2pManager.ActionListener {
-override fun onSuccess() {
-mgr.discoverServices(ch, null)
-mgr.discoverPeers(ch, null)
-}
-override fun onFailure(r: Int) {
-mgr.discoverPeers(ch, null)
-}
-})
-}
-override fun onFailure(r: Int) {
-mgr.discoverPeers(ch, null)
-}
-})
-}
-}
-​private fun connectToDiscoveredLeader(device: WifiP2pDevice?, ssid: String, pass: String) {
-if (isSystemMobileHotspotActive() || isGroupOwnerNow) return
-val mgr = p2pManager ?: return
-val ch = channel ?: return
-​runCatching { mgr.stopPeerDiscovery(ch, null) }
-runCatching { mgr.clearServiceRequests(ch, null) }
-​if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && ssid.startsWith("DIRECT-") && pass.length >= 8) {
-val cfg = WifiP2pConfig.Builder()
-.setNetworkName(ssid)
-.setPassphrase(pass)
-.build()
-mgr.connect(ch, cfg, object : WifiP2pManager.ActionListener {
-override fun onSuccess() {
-onStatusChange("✓ تم الربط التلقائي بشبكة ($ssid)")
-onTopologyChanged("192.168.49.1")
-}
-override fun onFailure(reason: Int) {
-connectViaP2pDeviceOrWifi(device, ssid, pass)
-}
-})
-return
-}
-​connectViaP2pDeviceOrWifi(device, ssid, pass)
-}
-​private fun connectViaP2pDeviceOrWifi(device: WifiP2pDevice?, ssid: String, pass: String) {
-val mgr = p2pManager
-val ch = channel
-​if (mgr != null && ch != null && device != null && device.deviceAddress.isNotEmpty() && device.isGroupOwner) {
-val cfg = WifiP2pConfig().apply {
-deviceAddress = device.deviceAddress
-wps.setup = WpsInfo.PBC
-groupOwnerIntent = 0
-}
-mgr.connect(ch, cfg, object : WifiP2pManager.ActionListener {
-override fun onSuccess() {
-onStatusChange("✓ تم الاتصال التلقائي بـ (${device.deviceName})")
-onTopologyChanged("192.168.49.1")
-}
-override fun onFailure(reason: Int) {
-connectViaLegacyWifiOrSpecifier(ssid, pass)
-}
-})
-return
-}
-​connectViaLegacyWifiOrSpecifier(ssid, pass)
-}
-​@Suppress("DEPRECATION")
-private fun connectViaLegacyWifiOrSpecifier(ssid: String, pass: String) {
-if (ssid.isEmpty() || pass.isEmpty()) return
-runCatching {
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-activeNetCallback?.let { runCatching { cm.unregisterNetworkCallback(it) } }
-val spec = WifiNetworkSpecifier.Builder()
-.setSsid(ssid)
-.setWpa2Passphrase(pass)
-.build()
-val req = NetworkRequest.Builder()
-.addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-.removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-.setNetworkSpecifier(spec)
-.build()
-val cb = object : ConnectivityManager.NetworkCallback() {
-override fun onAvailable(network: Network) {
-cm.bindProcessToNetwork(network)
-isConnectedNow = true
-groupOwnerIp = "192.168.49.1"
-onStatusChange("✓ متصل تلقائياً بشبكة ($ssid)")
-onTopologyChanged("192.168.49.1")
-}
-}
-activeNetCallback = cb
-cm.requestNetwork(req, cb)
-} else {
-val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-val conf = WifiConfiguration().apply {
-SSID = ""$ssid""
-preSharedKey = ""$pass""
-}
-val netId = wifi.addNetwork(conf)
-if (netId != -1) {
-wifi.disconnect()
-wifi.enableNetwork(netId, true)
-wifi.reconnect()
-onStatusChange("✓ تم الربط التلقائي بوايفاي ($ssid)")
-onTopologyChanged("192.168.49.1")
-}
-}
-}
-}
-​private fun registerP2pReceiver() {
-val filter = IntentFilter().apply {
-addAction(WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION)
-addAction(WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION)
-addAction(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION)
-}
-receiver = object : BroadcastReceiver() {
-override fun onReceive(ctx: Context?, intent: Intent?) {
-if (isSystemMobileHotspotActive()) return
-val act = intent?.action ?: return
-val mgr = p2pManager ?: return
-val ch = channel ?: return
-​when (act) {
-WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
-mgr.requestConnectionInfo(ch) { info: WifiP2pInfo? ->
-if (info != null && info.groupFormed) {
-isCreatingGroupInFlight = false
-isConnectedNow = true
-isGroupOwnerNow = info.isGroupOwner
-val goIp = info.groupOwnerAddress?.hostAddress ?: "192.168.49.1"
-groupOwnerIp = goIp
-onTopologyChanged(goIp)
-mgr.requestGroupInfo(ch) { grp ->
-if (grp != null) {
-groupClientCount = grp.clientList?.size ?: 0
-groupSsid = grp.networkName ?: "DIRECT-BM-BIKEMIC"
-groupPass = grp.passphrase ?: "bikemic1234"
-if (grp.isGroupOwner) {
-advertisePresenceAndGroup()
-mgr.discoverPeers(ch, null)
-}
-}
-}
-} else if (!isCreatingGroupInFlight) {
-isConnectedNow = false
-isGroupOwnerNow = false
-groupClientCount = 0
-}
-}
-}
-WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
-if (cycleMode == CycleMode.SEARCHING && !isGroupOwnerNow && !isConnectedNow) {
-mgr.requestPeers(ch) { peers ->
-val existingGo = peers.deviceList.firstOrNull { it.isGroupOwner }
-if (existingGo != null) {
-val now = System.currentTimeMillis()
-if (now - lastConnectAttemptMs > 4000L) {
-lastConnectAttemptMs = now
-onStatusChange("تم اكتشاف نقطة اتصال (${existingGo.deviceName}) • جاري الربط...")
-connectViaP2pDeviceOrWifi(existingGo, "", "")
-}
-}
-}
-}
-}
-}
-}
-}
-context.registerReceiver(receiver, filter)
-}
-​fun stop() {
-scope.cancel()
-val mgr = p2pManager
-val ch = channel
-runCatching {
-if (mgr != null && ch != null) {
-localServiceInfo?.let { mgr.removeLocalService(ch, it, null) }
-mgr.clearServiceRequests(ch, null)
-mgr.removeGroup(ch, null)
-}
-}
-runCatching { receiver?.let { context.unregisterReceiver(it) } }
-runCatching {
-val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-activeNetCallback?.let { cm.unregisterNetworkCallback(it) }
-}
-}
-}
-""")
-​# =========================================================
-# 9. MeshVoiceEngine.kt
-#    - Red Mic Off (isOpenMicOn == false):
-#      1) Closes BOTH outgoing and incoming continuous conversation audio
-#      2) Broadcasts "mic": false in heartbeats & gossip so other riders see "غير منضم للمحادثة"
-#      3) ALWAYS plays incoming PTT Telegrams (isPttTelegram == true) even when Red Mic is closed!
-#    - PTT Music Ducking:
-#      Automatically lowers music volume ONLY during PTT Telegram (press or receive) and restores it right after!
-# =========================================================
-write("app/src/main/java/com/bikemic/app/MeshVoiceEngine.kt", r"""
-package com.bikemic.app
-​import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioManager
-import android.media.AudioRecord
-import android.media.AudioTrack
-import android.media.MediaRecorder
-import android.media.ToneGenerator
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.AutomaticGainControl
-import android.media.audiofx.NoiseSuppressor
-import android.net.ConnectivityManager
-import android.net.wifi.WifiManager
-import android.os.Build
-import android.os.PowerManager
-import android.os.VibrationEffect
-import android.os.Vibrator
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateOf
-import kotlinx.coroutines.*
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.File
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.Inet4Address
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.MulticastSocket
-import java.net.NetworkInterface
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.util.Collections
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
-import kotlin.random.Random
-​class MeshVoiceEngine(private val context: Context) {
-​companion object {
-private const val DISCOVERY_PORT = 50004
-private const val AUDIO_PORT = 50005
-private const val MULTICAST_GROUP = "239.255.42.99"
-private const val SAMPLE_RATE = 16000
-private const val SAMPLES_PER_FRAME = 320
-private const val MAGIC_AUDIO_ULAW: Byte = 0x43
-private const val HEADER_SIZE = 20
-}
-​val selfId: Long = Random.nextLong(100_000L, Long.MAX_VALUE)
-@Volatile var userName: String = "أبو ناصر"
-@Volatile var chainRank: Int = 1
-@Volatile var isOpenMicOn: Boolean = false
-private set
-val isOpenMicOnState = mutableStateOf(false)
-​// Per-Rider Open-Mic Mute Set
-val mutedOpenMicPeerIds: MutableSet<Long> = Collections.newSetFromMap(ConcurrentHashMap())
-val mutedPeersStateList = mutableStateListOf<Long>()
-​@Volatile private var pttActiveInternal: Boolean = false
-@Volatile private var incomingPttActive: Boolean = false
-@Volatile private var currentBurstId: Int = 0
-private val burstCounter = AtomicInteger(Random.nextInt(100, 999999))
-​@Volatile var batteryPct: Int = 100
-@Volatile var isCharging: Boolean = false
-@Volatile var thermalStatus: Int = 0
-val hardwareSpecScore: Int = DeviceHealthMonitor.computeHardwareSpecScore(context)
-​val peersListState = mutableStateListOf<PeerInfo>()
-val peersVersion = mutableIntStateOf(0)
-val connectedCount = mutableIntStateOf(0)
-val currentHostIdState = mutableLongStateOf(selfId)
-val currentEpochState = mutableLongStateOf(0L)
-val statusText = mutableStateOf("بانتظار اتصال الهواتف الأخرى تلقائياً...")
-val autoNetBanner = mutableStateOf("🔍 جاري تهيئة نقطة الاتصال والبحث التلقائي...")
-val activeSpeakerName = mutableStateOf<String?>(null)
-val leaderChangeEvent = mutableStateOf<String?>(null)
-​// Bluetooth Audio state
-val isBtConnectedState = mutableStateOf(false)
-val btRouteLabelState = mutableStateOf("🔊 مضخم الهاتف (وصّل بلوتوث للتحويل التلقائي)")
-​// PTT Telegram ACK tracking
-val ackedPeerNames = mutableStateListOf<String>()
-val lastAckSummary = mutableStateOf<String?>(null)
-private val ackedPeerIdsForBurst = Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
-private val receivedBurstsAcked = Collections.synchronizedMap(
-object : LinkedHashMap<Long, Long>(256, 0.75f, true) {
-override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Long>?) = size > 200
-}
-)
-​val debugSentCount = mutableIntStateOf(0)
-val debugReceivedCount = mutableIntStateOf(0)
-val debugLastError = mutableStateOf("لا توجد أخطاء")
-@Volatile private var cachedIfacesInfo: List<Pair<String, String>> = emptyList()
-@Volatile private var cachedTargetIps: Set<InetAddress> = emptySet()
-@Volatile private var cachedLocalIps: Set<String> = emptySet()
-​val peersMap = ConcurrentHashMap<Long, PeerInfo>()
-private val knownHintIps = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
-​private val seenAudio = Collections.synchronizedMap(
-object : LinkedHashMap<Long, Boolean>(2048, 0.75f, true) {
-override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Boolean>?) = size > 1600
-}
-)
-private val seenCtrlMsg = Collections.synchronizedMap(
-object : LinkedHashMap<Long, Boolean>(512, 0.75f, true) {
-override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Boolean>?) = size > 400
-}
-)
-​private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-private val seqCounter = AtomicInteger(1)
-private var ackAutoClearJob: Job? = null
-private var incomingPttUnduckJob: Job? = null
-​private val election = LeaderElection(selfId, minHealthyBattery = 30)
-private var autoHotspot: AutoMeshHotspotManager? = null
-var btAudioRouter: BluetoothAudioRouter? = null
-private set
-@Volatile private var activeAudioTrack: AudioTrack? = null
-@Volatile private var activeAudioRecorder: AudioRecord? = null
-​private var multicastLock: WifiManager.MulticastLock? = null
-private var wifiLock: WifiManager.WifiLock? = null
-private var cpuWakeLock: PowerManager.WakeLock? = null
-private var toneGen: ToneGenerator? = null
-@Volatile private var isEngineStarted: Boolean = false
-​@Volatile private var discoverySocket: DatagramSocket? = null
-@Volatile private var multicastSocket: MulticastSocket? = null
-@Volatile private var audioSocket: DatagramSocket? = null
-​private val ulawToLinearTable = ShortArray(256) { idx ->
-val u = idx.inv() and 0xFF
-val sign = u and 0x80
-val exponent = (u shr 4) and 0x07
-val mantissa = u and 0x0F
-var sample = ((mantissa shl 3) + 0x84) shl exponent
-sample -= 0x84
-(if (sign != 0) -sample else sample).coerceIn(-32768, 32767).toShort()
-}
-​private fun linearToUlaw(sampleIn: Int): Byte {
-val BIAS = 0x84
-val CLIP = 32635
-var sample = sampleIn
-val sign = if (sample < 0) {
-sample = -sample
-0x80
-} else {
-0x00
-}
-if (sample > CLIP) sample = CLIP
-sample += BIAS
-var exponent = 7
-var expMask = 0x4000
-while (exponent > 0 && (sample and expMask) == 0) {
-exponent--
-expMask = expMask shr 1
-}
-val mantissa = (sample shr (exponent + 3)) and 0x0F
-val ulawByte = (sign or (exponent shl 4) or mantissa).inv()
-return ulawByte.toByte()
-}
-​/
-* Toggles or sets the Red Open Mic state:
-* - When OFF: closes both outgoing & incoming continuous chat audio,
-*   and broadcasts to all riders that this user is "غير منضم للمحادثة" (Not joined in chat),
-*   while STILL receiving & sending PTT Telegrams!
-*/
-fun setOpenMicEnabled(enabled: Boolean) {
-isOpenMicOn = enabled
-mainScope.launch { isOpenMicOnState.value = enabled }
-scope.launch {
-repeat(2) {
-sendHeartbeatNow()
-delay(120L)
-}
-}
-}
-​fun toggleOpenMic() {
-setOpenMicEnabled(!isOpenMicOn)
-}
-​private fun refreshMusicDuckState() {
-val shouldDuck = pttActiveInternal || incomingPttActive
-btAudioRouter?.setPttMusicDucking(shouldDuck)
-}
-​fun toggleMutePeerOpenMic(nodeId: Long) {
-if (mutedOpenMicPeerIds.contains(nodeId)) {
-mutedOpenMicPeerIds.remove(nodeId)
-mutedPeersStateList.remove(nodeId)
-} else {
-mutedOpenMicPeerIds.add(nodeId)
-if (!mutedPeersStateList.contains(nodeId)) {
-mutedPeersStateList.add(nodeId)
-}
-}
-}
-​fun setAllOpenMicMuted(muteAll: Boolean) {
-if (muteAll) {
-peersMap.keys.forEach { id ->
-mutedOpenMicPeerIds.add(id)
-if (!mutedPeersStateList.contains(id)) mutedPeersStateList.add(id)
-}
-} else {
-mutedOpenMicPeerIds.clear()
-mutedPeersStateList.clear()
-}
-}
-​fun getSelfPowerScoreInt(): Int =
-election.devicePowerScore(batteryPct, isCharging, thermalStatus, hardwareSpecScore).toInt()
-​fun getPeerPowerScoreInt(p: PeerInfo): Int =
-election.peerPowerScore(p).toInt()
-​private fun buildSelfPeerInfo(nowMs: Long = System.currentTimeMillis()): PeerInfo =
-PeerInfo(
-nodeId = selfId,
-name = userName,
-chainRank = chainRank,
-batteryPct = batteryPct,
-isCharging = isCharging,
-thermalStatus = thermalStatus,
-hardwareSpecScore = hardwareSpecScore,
-epoch = election.currentEpoch,
-currentHostId = election.currentHostId,
-ipAddress = "",
-lastSeenMs = nowMs,
-handshakeOk = true,
-isDirect = true,
-isOpenMicOn = isOpenMicOn
-)
-​fun toggleAudioRoute() {
-btAudioRouter?.toggleSpeakerOrBluetooth()
-activeAudioTrack?.let { btAudioRouter?.bindAudioTrackToPreferredDevice(it) }
-activeAudioRecorder?.let { btAudioRouter?.bindAudioRecordToPreferredDevice(it) }
-}
-​fun refreshBluetoothNow() {
-btAudioRouter?.refreshAudioRoute()
-activeAudioTrack?.let { btAudioRouter?.bindAudioTrackToPreferredDevice(it) }
-activeAudioRecorder?.let { btAudioRouter?.bindAudioRecordToPreferredDevice(it) }
-autoHotspot?.ensureRunningAndRetryIfNeeded()
-}
-​fun setPttPressed(pressed: Boolean) {
-if (pressed && !pttActiveInternal) {
-val bId = burstCounter.incrementAndGet()
-currentBurstId = bId
-ackedPeerIdsForBurst.clear()
-ackAutoClearJob?.cancel()
-mainScope.launch {
-ackedPeerNames.clear()
-lastAckSummary.value = "⚡ جاري إرسال البرقية..."
-}
-pttActiveInternal = true
-// Automatically lower music volume ONLY during PTT Telegram
-refreshMusicDuckState()
-playShortBeep(ToneGenerator.TONE_PROP_BEEP, 45)
-} else if (!pressed && pttActiveInternal) {
-val finishedBurstId = currentBurstId
-pttActiveInternal = false
-// Restore music volume immediately when PTT Telegram ends (if no incoming PTT)
-refreshMusicDuckState()
-scope.launch {
-sendBurstEndSignal(finishedBurstId)
-}
-ackAutoClearJob?.cancel()
-ackAutoClearJob = mainScope.launch {
-delay(6500L)
-lastAckSummary.value = null
-}
-}
-}
-​private fun playShortBeep(tone: Int, durationMs: Int) {
-runCatching {
-if (toneGen == null) {
-toneGen = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 75)
-}
-toneGen?.startTone(tone, durationMs)
-}
-}
-​private fun vibrateConfirmation() {
-runCatching {
-val vib = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-vib.vibrate(VibrationEffect.createOneShot(65L, VibrationEffect.DEFAULT_AMPLITUDE))
-} else {
-@Suppress("DEPRECATION")
-vib.vibrate(65L)
-}
-}
-}
-​fun start() {
-if (isEngineStarted) return
-isEngineStarted = true
-​runCatching {
-val pm = context.applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
-cpuWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BikeMic::CpuWakeLock").apply {
-setReferenceCounted(false)
-acquire()
-}
-}
-runCatching {
-val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-multicastLock = wifi.createMulticastLock("BikeMicMulticast").apply {
-setReferenceCounted(false)
-acquire()
-}
-val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-} else {
-@Suppress("DEPRECATION")
-WifiManager.WIFI_MODE_FULL_HIGH_PERF
-}
-wifiLock = wifi.createWifiLock(lockMode, "BikeMicWifi").apply {
-setReferenceCounted(false)
-acquire()
-}
-}.onFailure { debugLastError.value = "WifiLock: ${it.message}" }
-​btAudioRouter = BluetoothAudioRouter(context) { isBt, _, label ->
-mainScope.launch {
-isBtConnectedState.value = isBt
-btRouteLabelState.value = label
-}
-activeAudioTrack?.let { btAudioRouter?.bindAudioTrackToPreferredDevice(it) }
-activeAudioRecorder?.let { btAudioRouter?.bindAudioRecordToPreferredDevice(it) }
-}.also {
-it.start()
-}
-​knownHintIps.add("192.168.49.1")
-​autoHotspot = AutoMeshHotspotManager(
-context = context,
-selfId = selfId,
-getSelfPowerScore = { getSelfPowerScoreInt() },
-getActiveUdpPeerCount = { peersMap.values.count { it.handshakeOk } },
-onStatusChange = { msg ->
-mainScope.launch { autoNetBanner.value = msg }
-},
-onTopologyChanged = { goIp ->
-if (!goIp.isNullOrEmpty()) knownHintIps.add(goIp)
-scope.launch { sendHeartbeatNow() }
-},
-onElectLeaderFromP2p = { leaderNodeId ->
-if (leaderNodeId == selfId) {
-val (h, ep) = election.declareSelfAsHost()
-currentHostIdState.longValue = h
-currentEpochState.longValue = ep
-} else {
-election.forceSetHost(leaderNodeId, election.currentEpoch)
-currentHostIdState.longValue = election.currentHostId
-}
-}
-).also {
-it.start()
-}
-​scope.launch {
-refreshNetworkTopology()
-val sockReady = initDiscoverySockets()
-if (sockReady) {
-startDiscoveryReceiver()
-startMulticastReceiver()
-startHeartbeatLoop()
-startElectionLoop()
-}
-startAudioEngine()
-}
-}
-​fun stop() {
-isEngineStarted = false
-runCatching {
-val bye = JSONObject().apply {
-put("t", "GOODBYE")
-put("id", selfId)
-put("epoch", election.currentEpoch)
-}
-sendToAllDiscoveryTargets(bye)
-}
-scope.cancel()
-mainScope.cancel()
-runCatching { btAudioRouter?.stop() }
-runCatching { autoHotspot?.stop() }
-runCatching { discoverySocket?.close() }
-runCatching { multicastSocket?.close() }
-runCatching { audioSocket?.close() }
-runCatching { toneGen?.release() }
-runCatching { if (multicastLock?.isHeld == true) multicastLock?.release() }
-runCatching { if (wifiLock?.isHeld == true) wifiLock?.release() }
-runCatching { if (cpuWakeLock?.isHeld == true) cpuWakeLock?.release() }
-}
-​fun updateUser(newName: String, newRank: Int) {
-userName = newName
-chainRank = newRank
-syncPeersToCompose()
-scope.launch { sendHeartbeatNow() }
-}
-​fun updateHealth(bat: Int, chg: Boolean, thermal: Int) {
-batteryPct = bat
-isCharging = chg
-thermalStatus = thermal
-syncPeersToCompose()
-}
-​fun getDebugInterfaces(): List<Pair<String, String>> = cachedIfacesInfo
-​fun getDebugBroadcasts(): List<String> = cachedTargetIps.mapNotNull { it.hostAddress }.sorted()
-​fun getAutoHotspotCredentials(): Pair<String, String> =
-(autoHotspot?.groupSsid ?: "") to (autoHotspot?.groupPass ?: "")
-​private fun isIgnoredInterface(name: String): Boolean {
-val n = name.lowercase()
-return n.startsWith("rmnet") || n.startsWith("ccmni") ||
-n.startsWith("pdp") || n.startsWith("dummy") ||
-n.startsWith("tun") || n.startsWith("ppp") ||
-n.startsWith("clat") || n.startsWith("v4-") || n.startsWith("lo")
-}
-​private fun isValidIpv4Literal(s: String): Boolean {
-val parts = s.split('.')
-if (parts.size != 4) return false
-for (p in parts) {
-val v = p.toIntOrNull() ?: return false
-if (v !in 0..255) return false
-}
-return s != "0.0.0.0"
-}
-​private fun refreshNetworkTopology() {
-val targets = LinkedHashSet<InetAddress>()
-val localIps = HashSet<String>()
-val ifaceList = ArrayList<Pair<String, String>>()
-​runCatching {
-val ifaces = NetworkInterface.getNetworkInterfaces()
-while (ifaces != null && ifaces.hasMoreElements()) {
-val nif = ifaces.nextElement()
-if (!nif.isUp || nif.isLoopback || isIgnoredInterface(nif.name)) continue
-​for (ia in nif.interfaceAddresses) {
-val addr = ia.address
-if (addr is Inet4Address && !addr.isLoopbackAddress) {
-val ipStr = addr.hostAddress ?: continue
-localIps.add(ipStr)
-ifaceList.add(nif.name to ipStr)
-​ia.broadcast?.let { targets.add(it) }
-​val prefix = ia.networkPrefixLength.toInt()
-if (prefix in 8..30) {
-val b = addr.address
-val ipInt = ((b[0].toInt() and 0xFF) shl 24) or
-((b[1].toInt() and 0xFF) shl 16) or
-((b[2].toInt() and 0xFF) shl 8) or
-(b[3].toInt() and 0xFF)
-val mask = -1 shl (32 - prefix)
-val bcastInt = (ipInt and mask) or mask.inv()
-val bcastBytes = byteArrayOf(
-(bcastInt ushr 24).toByte(),
-(bcastInt ushr 16).toByte(),
-(bcastInt ushr 8).toByte(),
-bcastInt.toByte()
-)
-runCatching { targets.add(InetAddress.getByAddress(bcastBytes)) }
-​val gwBytes = byteArrayOf(b[0], b[1], b[2], 1)
-val gwAddr = InetAddress.getByAddress(gwBytes)
-if (gwAddr.hostAddress != ipStr) targets.add(gwAddr)
-}
-}
-}
-}
-}
-​if ("192.168.49.1" !in localIps) {
-runCatching { targets.add(InetAddress.getByName("192.168.49.1")) }
-}
-runCatching { targets.add(InetAddress.getByName("192.168.49.255")) }
-​runCatching {
-val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-for (net in cm.allNetworks) {
-val lp = cm.getLinkProperties(net) ?: continue
-val ifName = lp.interfaceName ?: ""
-if (ifName.isNotEmpty() && isIgnoredInterface(ifName)) continue
-for (route in lp.routes) {
-val gw = route.gateway
-if (gw is Inet4Address && !gw.isLoopbackAddress && !gw.isAnyLocalAddress) {
-val gwStr = gw.hostAddress ?: ""
-if (gwStr !in localIps) targets.add(gw)
-}
-}
-}
-}
-​runCatching {
-val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-@Suppress("DEPRECATION")
-val dhcp = wifi.dhcpInfo
-if (dhcp != null && dhcp.gateway != 0) {
-val g = dhcp.gateway
-val gwBytes = byteArrayOf(
-(g and 0xFF).toByte(),
-((g shr 8) and 0xFF).toByte(),
-((g shr 16) and 0xFF).toByte(),
-((g shr 24) and 0xFF).toByte()
-)
-val gwAddr = InetAddress.getByAddress(gwBytes)
-if (gwAddr.hostAddress !in localIps) targets.add(gwAddr)
-}
-}
-​runCatching {
-val arpFile = File("/proc/net/arp")
-if (arpFile.canRead()) {
-arpFile.forEachLine { line ->
-val tokens = line.trim().split(' ', '\t').filter { it.isNotEmpty() }
-if (tokens.size >= 6) {
-val ip = tokens[0]
-val dev = tokens[5]
-if (isValidIpv4Literal(ip) && ip !in localIps && !isIgnoredInterface(dev)) {
-runCatching { targets.add(InetAddress.getByName(ip)) }
-}
-}
-}
-}
-}
-​peersMap.values.forEach { p ->
-if (p.ipAddress.isNotEmpty() && p.ipAddress !in localIps) {
-runCatching { targets.add(InetAddress.getByName(p.ipAddress)) }
-}
-}
-knownHintIps.forEach { ip ->
-if (ip !in localIps) {
-runCatching { targets.add(InetAddress.getByName(ip)) }
-}
-}
-​runCatching { targets.add(InetAddress.getByName(MULTICAST_GROUP)) }
-runCatching { targets.add(InetAddress.getByName("255.255.255.255")) }
-​cachedLocalIps = localIps
-cachedIfacesInfo = ifaceList
-cachedTargetIps = targets
-}
-​private fun initDiscoverySockets(): Boolean {
-return try {
-discoverySocket = DatagramSocket(null).apply {
-reuseAddress = true
-broadcast = true
-bind(InetSocketAddress(DISCOVERY_PORT))
-}
-runCatching {
-val group = InetAddress.getByName(MULTICAST_GROUP)
-val ms = MulticastSocket(DISCOVERY_PORT).apply {
-reuseAddress = true
-timeToLive = 4
-}
-var joinedAny = false
-val ifaces = NetworkInterface.getNetworkInterfaces()
-while (ifaces != null && ifaces.hasMoreElements()) {
-val nif = ifaces.nextElement()
-if (nif.isUp && !nif.isLoopback && nif.supportsMulticast() && !isIgnoredInterface(nif.name)) {
-runCatching {
-ms.joinGroup(InetSocketAddress(group, DISCOVERY_PORT), nif)
-joinedAny = true
-}
-}
-}
-if (!joinedAny) {
-@Suppress("DEPRECATION")
-runCatching { ms.joinGroup(group) }
-}
-multicastSocket = ms
-}
-true
-} catch (e: Exception) {
-debugLastError.value = "فشل فتح منفذ الشبكة: ${e.message}"
-false
-}
-}
-​private fun sendUnicastJson(obj: JSONObject, targetAddr: InetAddress) {
-val sock = discoverySocket ?: return
-val data = obj.toString().toByteArray(Charsets.UTF_8)
-runCatching {
-sock.send(DatagramPacket(data, data.size, targetAddr, DISCOVERY_PORT))
-debugSentCount.intValue += 1
-}
-}
-​private fun sendToAllDiscoveryTargets(obj: JSONObject, excludeIp: String? = null) {
-val sock = discoverySocket ?: return
-val data = obj.toString().toByteArray(Charsets.UTF_8)
-for (target in cachedTargetIps) {
-if (excludeIp != null && target.hostAddress == excludeIp) continue
-runCatching {
-sock.send(DatagramPacket(data, data.size, target, DISCOVERY_PORT))
-debugSentCount.intValue += 1
-}
-}
-}
-​private fun buildSelfHeartbeatJson(type: String = "HB"): JSONObject {
-val now = System.currentTimeMillis()
-val peersArr = JSONArray()
-peersMap.values.forEach { p ->
-if (now - p.lastSeenMs < 7000L && p.ipAddress.isNotEmpty()) {
-peersArr.put(JSONObject().apply {
-put("id", p.nodeId)
-put("ip", p.ipAddress)
-put("name", p.name)
-put("rank", p.chainRank)
-put("bat", p.batteryPct)
-put("chg", p.isCharging)
-put("thm", p.thermalStatus)
-put("hw", p.hardwareSpecScore)
-put("epoch", p.epoch)
-put("host", p.currentHostId)
-put("mic", p.isOpenMicOn)
-put("age", (now - p.lastSeenMs).coerceAtLeast(0L))
-})
-}
-}
-return JSONObject().apply {
-put("t", type)
-put("id", selfId)
-put("name", userName)
-put("rank", chainRank)
-put("bat", batteryPct)
-put("chg", isCharging)
-put("thm", thermalStatus)
-put("hw", hardwareSpecScore)
-put("epoch", election.currentEpoch)
-put("host", election.currentHostId)
-put("mic", isOpenMicOn)
-put("peers", peersArr)
-}
-}
-​private fun sendHeartbeatNow() {
-refreshNetworkTopology()
-sendToAllDiscoveryTargets(buildSelfHeartbeatJson("HB"))
-}
-​private fun sendBurstEndSignal(burstId: Int) {
-if (burstId <= 0) return
-val pkt = JSONObject().apply {
-put("t", "BURST_END")
-put("id", selfId)
-put("name", userName)
-put("rank", chainRank)
-put("burstId", burstId)
-put("msgId", Random.nextLong(1L, Long.MAX_VALUE))
-put("ttl", 2)
-}
-repeat(2) {
-sendToAllDiscoveryTargets(pkt)
-}
-}
-​private fun sendBurstAck(targetSenderId: Long, burstId: Int, replyAddr: InetAddress?) {
-val ackObj = JSONObject().apply {
-put("t", "BURST_ACK")
-put("id", selfId)
-put("name", userName)
-put("rank", chainRank)
-put("targetId", targetSenderId)
-put("burstId", burstId)
-put("msgId", Random.nextLong(1L, Long.MAX_VALUE))
-put("ttl", 2)
-}
-if (replyAddr != null) {
-sendUnicastJson(ackObj, replyAddr)
-}
-sendToAllDiscoveryTargets(ackObj)
-}
-​private fun startDiscoveryReceiver() {
-scope.launch {
-val buf = ByteArray(8192)
-while (isActive) {
-try {
-val pkt = DatagramPacket(buf, buf.size)
-discoverySocket?.receive(pkt) ?: break
-handleDiscoveryPacket(pkt)
-} catch (e: Exception) {
-if (isActive) delay(150)
-}
-}
-}
-}
-​private fun startMulticastReceiver() {
-val ms = multicastSocket ?: return
-scope.launch {
-val buf = ByteArray(8192)
-while (isActive) {
-try {
-val pkt = DatagramPacket(buf, buf.size)
-ms.receive(pkt)
-handleDiscoveryPacket(pkt)
-} catch (e: Exception) {
-if (isActive) delay(250)
-}
-}
-}
-}
-​private fun handleDiscoveryPacket(pkt: DatagramPacket) {
-runCatching {
-val text = String(pkt.data, 0, pkt.length, Charsets.UTF_8)
-val msg = JSONObject(text)
-val senderId = msg.optLong("id", -1L)
-if (senderId <= 0L || senderId == selfId) return
-​debugReceivedCount.intValue += 1
-val now = System.currentTimeMillis()
-​val senderIp = pkt.address.hostAddress ?: ""
-if (senderIp.isNotEmpty() && senderIp !in cachedLocalIps) {
-knownHintIps.add(senderIp)
-}
-​val type = msg.optString("t")
-when (type) {
-"HB", "DIRECT_ACK" -> {
-val existed = peersMap[senderId]
-val peer = PeerInfo(
-nodeId = senderId,
-name = msg.optString("name", existed?.name ?: "راكب").ifBlank { "راكب" },
-chainRank = msg.optInt("rank", existed?.chainRank ?: 2),
-batteryPct = msg.optInt("bat", existed?.batteryPct ?: 100),
-isCharging = msg.optBoolean("chg", existed?.isCharging ?: false),
-thermalStatus = msg.optInt("thm", existed?.thermalStatus ?: 0),
-hardwareSpecScore = msg.optInt("hw", existed?.hardwareSpecScore ?: 20),
-epoch = msg.optLong("epoch", existed?.epoch ?: 0L),
-currentHostId = msg.optLong("host", senderId),
-ipAddress = senderIp.ifEmpty { existed?.ipAddress ?: "" },
-lastSeenMs = now,
-handshakeOk = true,
-isDirect = true,
-isOpenMicOn = msg.optBoolean("mic", existed?.isOpenMicOn ?: false)
-)
-peersMap[senderId] = peer
-​val remoteHost = msg.optLong("host", -1L)
-val remoteEpoch = msg.optLong("epoch", 0L)
-if (remoteHost > 0L && election.acceptHostAnnouncement(remoteHost, remoteEpoch)) {
-currentHostIdState.longValue = election.currentHostId
-currentEpochState.longValue = election.currentEpoch
-}
-​val gossipArr = msg.optJSONArray("peers")
-if (gossipArr != null) {
-for (i in 0 until gossipArr.length()) {
-val gp = gossipArr.optJSONObject(i) ?: continue
-val gId = gp.optLong("id", -1L)
-if (gId <= 0L || gId == selfId) continue
-val gIp = gp.optString("ip", "")
-val gName = gp.optString("name", "راكب").ifBlank { "راكب" }
-val gRank = gp.optInt("rank", 2)
-val gBat = gp.optInt("bat", 100)
-val gChg = gp.optBoolean("chg", false)
-val gThm = gp.optInt("thm", 0)
-val gHw = gp.optInt("hw", 20)
-val gEpoch = gp.optLong("epoch", 0L)
-val gHost = gp.optLong("host", gId)
-val gMic = gp.optBoolean("mic", false)
-val gAge = gp.optLong("age", 0L).coerceIn(0L, 6000L)
-val inferredSeen = now - gAge
-​val currentEntry = peersMap[gId]
-if (currentEntry == null || (inferredSeen > currentEntry.lastSeenMs + 1200L)) {
-val resolvedIp = if (gIp.isNotEmpty() && gIp !in cachedLocalIps) gIp else (currentEntry?.ipAddress ?: senderIp)
-peersMap[gId] = PeerInfo(
-nodeId = gId,
-name = gName,
-chainRank = gRank,
-batteryPct = gBat,
-isCharging = gChg,
-thermalStatus = gThm,
-hardwareSpecScore = gHw,
-epoch = gEpoch,
-currentHostId = gHost,
-ipAddress = resolvedIp,
-lastSeenMs = maxOf(currentEntry?.lastSeenMs ?: 0L, inferredSeen),
-handshakeOk = true,
-isDirect = currentEntry?.isDirect ?: false,
-isOpenMicOn = gMic
-)
-}
-​if (gIp.isNotEmpty() && gIp !in cachedLocalIps) {
-if (knownHintIps.add(gIp) || currentEntry == null) {
-runCatching {
-sendUnicastJson(buildSelfHeartbeatJson("HB"), InetAddress.getByName(gIp))
-}
-}
-}
-}
-}
-​if (type == "HB" || existed == null || !existed.handshakeOk) {
-sendUnicastJson(buildSelfHeartbeatJson("DIRECT_ACK"), pkt.address)
-}
-​syncPeersToCompose()
-}
-"BURST_END" -> {
-val msgId = msg.optLong("msgId", 0L)
-if (msgId != 0L && seenCtrlMsg.put(msgId, true) != null) return
-val burstId = msg.optInt("burstId", 0)
-if (burstId > 0) {
-val key = (senderId shl 20) xor burstId.toLong()
-if (receivedBurstsAcked.put(key, now) == null) {
-sendBurstAck(senderId, burstId, pkt.address)
-}
-}
-// Incoming PTT burst finished -> restore music volume immediately
-incomingPttUnduckJob?.cancel()
-incomingPttActive = false
-refreshMusicDuckState()
-​val ttl = msg.optInt("ttl", 0)
-if (ttl > 0 && peersMap.size > 1) {
-msg.put("ttl", ttl - 1)
-sendToAllDiscoveryTargets(msg, excludeIp = senderIp)
-}
-}
-"BURST_ACK" -> {
-val msgId = msg.optLong("msgId", 0L)
-if (msgId != 0L && seenCtrlMsg.put(msgId, true) != null) return
-val targetId = msg.optLong("targetId", -1L)
-val burstId = msg.optInt("burstId", 0)
-val ackerName = msg.optString("name", peersMap[senderId]?.name ?: "راكب")
-val ackerRank = msg.optInt("rank", peersMap[senderId]?.chainRank ?: 2)
-​if (targetId == selfId && burstId == currentBurstId && burstId > 0) {
-if (ackedPeerIdsForBurst.add(senderId)) {
-val label = "$ackerName (#ackerRank)"
-mainScope.launch {
-if (!ackedPeerNames.contains(label)) {
-ackedPeerNames.add(label)
-}
-val joinedNames = ackedPeerNames.joinToString("، ")
-lastAckSummary.value = "✓ وصلت البرقية إلى ({ackedPeerNames.size}): $joinedNames"
-}
-playShortBeep(ToneGenerator.TONE_PROP_ACK, 70)
-vibrateConfirmation()
-}
-} else {
-val ttl = msg.optInt("ttl", 0)
-if (ttl > 0 && peersMap.size > 1) {
-msg.put("ttl", ttl - 1)
-sendToAllDiscoveryTargets(msg, excludeIp = senderIp)
-}
-}
-}
-"STEP_DOWN" -> {
-val epoch = msg.optLong("epoch", 0L)
-val nextHostId = msg.optLong("nextHostId", -1L)
-val reason = msg.optString("reason", "تبديل تلقائي")
-if (epoch >= election.currentEpoch) {
-statusText.value = "تبديل القائد ($reason)..."
-if (nextHostId == selfId) {
-promoteSelfToLeaderAndHost(minEpoch = epoch, reason = reason)
-} else if (nextHostId > 0L) {
-election.forceSetHost(nextHostId, epoch + 1L)
-currentHostIdState.longValue = election.currentHostId
-currentEpochState.longValue = election.currentEpoch
-}
-}
-}
-"GOODBYE" -> {
-val wasHost = (senderId == election.currentHostId)
-peersMap.remove(senderId)
-syncPeersToCompose()
-if (wasHost) {
-electStrongestRemainingLeaderNow("إغلاق هاتف القائد السابق")
-}
-}
-"I_AM_HOST" -> {
-val newHost = msg.optLong("id", -1L)
-val epoch = msg.optLong("epoch", 0L)
-if (newHost > 0L && election.acceptHostAnnouncement(newHost, epoch)) {
-currentHostIdState.longValue = election.currentHostId
-currentEpochState.longValue = election.currentEpoch
-val hostName = if (newHost == selfId) userName else (peersMap[newHost]?.name ?: "راكب")
-leaderChangeEvent.value = "القائد الحالي (الأقوى): $hostName"
-statusText.value = "متصل • القائد: $hostName"
-}
-}
-}
-}.onFailure {
-debugLastError.value = "Parse: ${it.message}"
-}
-}
-​private fun promoteSelfToLeaderAndHost(minEpoch: Long = election.currentEpoch, reason: String = "الأقوى جهازاً وبطارية") {
-val (newHost, newEpoch) = election.declareSelfAsHost(minEpoch)
-currentHostIdState.longValue = newHost
-currentEpochState.longValue = newEpoch
-autoHotspot?.promoteToHostNow()
-val announce = JSONObject().apply {
-put("t", "I_AM_HOST")
-put("id", newHost)
-put("epoch", newEpoch)
-}
-repeat(3) {
-sendToAllDiscoveryTargets(announce)
-}
-leaderChangeEvent.value = "أصبحت أنت القائد ($reason)"
-syncPeersToCompose()
-}
-​private fun electStrongestRemainingLeaderNow(reason: String) {
-val selfPeer = buildSelfPeerInfo()
-val winner = election.pickBestLeader(selfPeer, peersMap.values)
-if (winner != null) {
-if (winner.nodeId == selfId) {
-promoteSelfToLeaderAndHost(reason = reason)
-} else {
-election.forceSetHost(winner.nodeId, election.currentEpoch + 1L)
-currentHostIdState.longValue = election.currentHostId
-currentEpochState.longValue = election.currentEpoch
-leaderChangeEvent.value = "انتقلت القيادة تلقائياً إلى ${winner.name} ($reason)"
-syncPeersToCompose()
-}
-}
-}
-​private fun syncPeersToCompose() {
-val sorted = peersMap.values.filter { it.handshakeOk }
-.sortedWith(
-compareByDescending<PeerInfo> { election.peerPowerScore(it) }
-.thenBy { it.chainRank }
-.thenBy { it.name }
-)
-val live = sorted.size
-connectedCount.intValue = live
-peersVersion.intValue += 1
-​mainScope.launch {
-peersListState.clear()
-peersListState.addAll(sorted)
-}
-​if (live > 0) {
-val hostId = election.currentHostId
-val hostName = if (hostId == selfId) "أنت ($userName)" else (peersMap[hostId]?.name ?: "راكب")
-statusText.value = "متصل ($live) • القائد: $hostName"
-} else {
-statusText.value = "التناوب التلقائي نشط (40ث نقطة اتصال ⇄ بحث عن دراجين)"
-}
-}
-​private fun startHeartbeatLoop() {
-scope.launch {
-while (isActive) {
-runCatching {
-sendHeartbeatNow()
-val now = System.currentTimeMillis()
-val dead = peersMap.filterValues { now - it.lastSeenMs > 5500L }.keys
-if (dead.isNotEmpty()) {
-val hostDied = dead.contains(election.currentHostId)
-dead.forEach { peersMap.remove(it) }
-if (hostDied) {
-electStrongestRemainingLeaderNow("انقطاع/إغلاق هاتف القائد")
-}
-}
-syncPeersToCompose()
-}.onFailure {
-debugLastError.value = "HB: ${it.message}"
-}
-delay(1000L + Random.nextLong(0L, 250L))
-}
-}
-}
-​private fun startElectionLoop() {
-scope.launch {
-while (isActive) {
-val now = System.currentTimeMillis()
-val currentHost = election.currentHostId
-val selfPeer = buildSelfPeerInfo(now)
-​val hostMissing = currentHost != selfId && !peersMap.containsKey(currentHost)
-if (peersMap.isNotEmpty() && (election.currentEpoch == 0L || hostMissing)) {
-val winner = election.pickBestLeader(selfPeer, peersMap.values)
-if (winner != null) {
-if (winner.nodeId == selfId && currentHost != selfId) {
-promoteSelfToLeaderAndHost(reason = if (hostMissing) "انقطاع القائد السابق" else "الهاتف الأقوى والأعلى بطارية")
-} else if (winner.nodeId != selfId && election.currentEpoch == 0L) {
-election.forceSetHost(winner.nodeId, 1L)
-currentHostIdState.longValue = election.currentHostId
-currentEpochState.longValue = election.currentEpoch
-}
-}
-}
-​if (currentHost == selfId && peersMap.isNotEmpty()) {
-val replacementPair = election.findReplacementIfShouldStepDown(selfPeer, peersMap.values, now)
-if (replacementPair != null) {
-val (nextLeader, reason) = replacementPair
-val sd = JSONObject().apply {
-put("t", "STEP_DOWN")
-put("id", selfId)
-put("epoch", election.currentEpoch)
-put("nextHostId", nextLeader.nodeId)
-put("reason", reason)
-}
-repeat(3) {
-sendToAllDiscoveryTargets(sd)
-}
-election.forceSetHost(nextLeader.nodeId, election.currentEpoch + 1L)
-currentHostIdState.longValue = election.currentHostId
-currentEpochState.longValue = election.currentEpoch
-autoHotspot?.stepDownHostGroupNow()
-leaderChangeEvent.value = "انتقلت القيادة تلقائياً إلى ${nextLeader.name} ($reason)"
-statusText.value = "تم نقل القيادة إلى ${nextLeader.name} ($reason)"
-}
-}
-​delay(1000L)
-}
-}
-}
-​private fun getAudioTargets(excludeIp: String? = null): List<InetAddress> {
-val set = LinkedHashSet<InetAddress>()
-val activePeers = peersMap.values.filter { it.handshakeOk && it.ipAddress.isNotEmpty() }
-for (p in activePeers) {
-if (p.ipAddress == excludeIp) continue
-runCatching { set.add(InetAddress.getByName(p.ipAddress)) }
-}
-if (set.isEmpty() || activePeers.any { !it.isDirect }) {
-for (t in cachedTargetIps) {
-if (t.hostAddress != excludeIp) set.add(t)
-}
-}
-return set.toList()
-}
-​private fun startAudioEngine() {
-try {
-audioSocket = DatagramSocket(null).apply {
-reuseAddress = true
-broadcast = true
-sendBufferSize = 65536
-receiveBufferSize = 65536
-trafficClass = 0xB8
-bind(InetSocketAddress(AUDIO_PORT))
-}
-} catch (e: Exception) {
-debugLastError.value = "AudioSocket: ${e.message}"
-return
-}
-​// RECEIVER & LOW-LATENCY JITTER-FREE PLAYER
-scope.launch {
-android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
-val minOut = AudioTrack.getMinBufferSize(
-SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
-).coerceAtLeast(SAMPLES_PER_FRAME * 4)
-​val track = AudioTrack.Builder()
-.setAudioAttributes(
-AudioAttributes.Builder()
-.setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-.setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-.build()
-)
-.setAudioFormat(
-AudioFormat.Builder()
-.setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-.setSampleRate(SAMPLE_RATE)
-.setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-.build()
-)
-.setBufferSizeInBytes(minOut * 3)
-.setTransferMode(AudioTrack.MODE_STREAM)
-.build()
-activeAudioTrack = track
-btAudioRouter?.bindAudioTrackToPreferredDevice(track)
-track.play()
-​val buf = ByteArray(1024)
-val decodedShorts = ShortArray(SAMPLES_PER_FRAME)
-var lastSample: Int = 0
-var lastClearJob: Job? = null
-​while (isActive) {
-try {
-val pkt = DatagramPacket(buf, buf.size)
-val sock = audioSocket ?: break
-sock.receive(pkt)
-if (pkt.length <= HEADER_SIZE || pkt.data[0] != MAGIC_AUDIO_ULAW) continue
-​val bb = ByteBuffer.wrap(pkt.data, 0, pkt.length).order(ByteOrder.LITTLE_ENDIAN)
-bb.get()
-val senderId = bb.long
-if (senderId == selfId) continue
-val seq = bb.int
-val burstId = bb.int
-val rank = bb.get().toInt()
-val ttl = bb.get().toInt()
-val modeFlags = bb.get().toInt()
-​val dedupKey = (senderId * 31L) xor seq.toLong()
-if (seenAudio.put(dedupKey, true) != null) continue
-​val isPttTelegram = (modeFlags and 1) != 0 && burstId > 0
-if (isPttTelegram) {
-val bKey = (senderId shl 20) xor burstId.toLong()
-if (receivedBurstsAcked.put(bKey, System.currentTimeMillis()) == null) {
-sendBurstAck(senderId, burstId, pkt.address)
-}
-// Automatically duck music while receiving a PTT Telegram, and restore right after
-incomingPttActive = true
-refreshMusicDuckState()
-incomingPttUnduckJob?.cancel()
-incomingPttUnduckJob = scope.launch {
-delay(500L)
-incomingPttActive = false
-refreshMusicDuckState()
-}
-}
-​if (ttl > 0 && peersMap.size > 1) {
-val relayCopy = pkt.data.copyOf(pkt.length)
-relayCopy[18] = (ttl - 1).toByte()
-val fromIp = pkt.address.hostAddress
-for (target in getAudioTargets(excludeIp = fromIp)) {
-runCatching {
-sock.send(DatagramPacket(relayCopy, relayCopy.size, target, AUDIO_PORT))
-}
-}
-}
-​// AUDIO RECEIVE RULES:
-// 1. Emergency PTT Telegram (isPttTelegram == true): ALWAYS plays even if Red Mic is OFF or peer is muted!
-// 2. Red Open Mic (isPttTelegram == false): ONLY plays if OUR Red Mic (isOpenMicOn) is ON
-//    AND the sender is not muted! When our Red Mic is OFF, incoming chat audio is closed.
-val shouldPlay = if (isPttTelegram) {
-true
-} else {
-isOpenMicOn && !mutedOpenMicPeerIds.contains(senderId)
-}
-​if (shouldPlay) {
-val payloadLen = (pkt.length - HEADER_SIZE).coerceAtMost(SAMPLES_PER_FRAME)
-for (i in 0 until payloadLen) {
-val uByte = pkt.data[HEADER_SIZE + i].toInt() and 0xFF
-val raw = ulawToLinearTable[uByte].toInt()
-val smoothed = ((raw * 7 + lastSample) shr 3).coerceIn(-32768, 32767)
-lastSample = smoothed
-decodedShorts[i] = smoothed.toShort()
-}
-track.write(decodedShorts, 0, payloadLen, AudioTrack.WRITE_NON_BLOCKING)
-​val name = peersMap[senderId]?.name ?: "راكب #$rank"
-val modeTag = if (isPttTelegram) "⚡ برقية طارئة من" else "🎙️ يتحدث"
-activeSpeakerName.value = "$modeTag: $name (#$rank)"
-lastClearJob?.cancel()
-lastClearJob = scope.launch {
-delay(550L)
-activeSpeakerName.value = null
-}
-}
-} catch (e: Exception) {
-if (isActive) delay(20)
-}
-}
-activeAudioTrack = null
-runCatching { track.stop(); track.release() }
-}
-​// TRANSMITTER
-scope.launch {
-android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
-val minBuf = AudioRecord.getMinBufferSize(
-SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-).coerceAtLeast(SAMPLES_PER_FRAME * 4)
-var recorder: AudioRecord? = null
-val pcmShorts = ShortArray(SAMPLES_PER_FRAME)
-val pktBytes = ByteArray(HEADER_SIZE + SAMPLES_PER_FRAME)
-​var prevX = 0
-var prevY = 0
-​while (isActive) {
-val pttNow = pttActiveInternal
-val openMicNow = isOpenMicOn
-val active = pttNow || openMicNow
-if (!active) {
-if (recorder != null) {
-activeAudioRecorder = null
-runCatching { recorder?.stop(); recorder?.release() }
-recorder = null
-}
-delay(15L)
-continue
-}
-if (recorder == null) {
-runCatching {
-btAudioRouter?.refreshAudioRoute()
-recorder = AudioRecord(
-MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-SAMPLE_RATE,
-AudioFormat.CHANNEL_IN_MONO,
-AudioFormat.ENCODING_PCM_16BIT,
-minBuf * 2
-).also { rec ->
-activeAudioRecorder = rec
-btAudioRouter?.bindAudioRecordToPreferredDevice(rec)
-if (NoiseSuppressor.isAvailable()) {
-runCatching { NoiseSuppressor.create(rec.audioSessionId)?.enabled = true }
-}
-if (AcousticEchoCanceler.isAvailable()) {
-runCatching { AcousticEchoCanceler.create(rec.audioSessionId)?.enabled = true }
-}
-if (AutomaticGainControl.isAvailable()) {
-runCatching { AutomaticGainControl.create(rec.audioSessionId)?.enabled = true }
-}
-rec.startRecording()
-}
-prevX = 0
-prevY = 0
-}.onFailure { debugLastError.value = "Mic: ${it.message}" }
-}
-​val readSamples = recorder?.read(pcmShorts, 0, SAMPLES_PER_FRAME) ?: -1
-if (readSamples > 0) {
-val seq = seqCounter.getAndIncrement()
-val bId = if (pttNow) currentBurstId else 0
-val flags: Byte = if (pttNow) 1 else 0
-​val bb = ByteBuffer.wrap(pktBytes).order(ByteOrder.LITTLE_ENDIAN)
-bb.put(MAGIC_AUDIO_ULAW)
-bb.putLong(selfId)
-bb.putInt(seq)
-bb.putInt(bId)
-bb.put(chainRank.toByte())
-bb.put(2.toByte())
-bb.put(flags)
-​for (i in 0 until readSamples) {
-val x = pcmShorts[i].toInt()
-val y = x - prevX + ((prevY * 251) shr 8)
-prevX = x
-prevY = y
-val boosted = ((y * 11) shr 3).coerceIn(-32600, 32600)
-pktBytes[HEADER_SIZE + i] = linearToUlaw(boosted)
-}
-​val totalLen = HEADER_SIZE + readSamples
-val sock = audioSocket
-if (sock != null) {
-for (target in getAudioTargets()) {
-runCatching {
-sock.send(DatagramPacket(pktBytes, totalLen, target, AUDIO_PORT))
-}
-}
-}
-}
-}
-activeAudioRecorder = null
-runCatching { recorder?.stop(); recorder?.release() }
-}
-}
-}
-""")
-​# =========================================================
-# 10. BikeMicService.kt (Foreground Service so app stays alive
-#     in the background when rider opens Google Maps / Navigation)
-# =========================================================
-write("app/src/main/java/com/bikemic/app/BikeMicService.kt", r"""
-package com.bikemic.app
-​import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
-import android.content.Context
-import android.content.Intent
-import android.content.pm.ServiceInfo
-import android.os.Build
-import android.os.IBinder
-​class BikeMicService : Service() {
-​companion object {
-private const val CHANNEL_ID = "bikemic_mesh_bg_channel"
-private const val NOTIF_ID = 1001
-​@Volatile var sharedEngine: MeshVoiceEngine? = null
-private set
-@Volatile var sharedHealth: DeviceHealthMonitor? = null
-private set
-​fun ensureStarted(context: Context): MeshVoiceEngine {
-val appCtx = context.applicationContext
-val prefs = appCtx.getSharedPreferences("bikemic_p2p", Context.MODE_PRIVATE)
-val defaultName = Build.MODEL?.take(12)?.ifBlank { "دراج" } ?: "دراج"
-​var eng = sharedEngine
-if (eng == null) {
-eng = MeshVoiceEngine(appCtx).apply {
-userName = prefs.getString("name", defaultName) ?: defaultName
-chainRank = prefs.getInt("rank", 1)
-}
-sharedEngine = eng
-sharedHealth = DeviceHealthMonitor(appCtx) { bat, chg, thm ->
-eng.updateHealth(bat, chg, thm)
-}.also { it.start() }
-eng.start()
-} else {
-eng.refreshBluetoothNow()
-}
-​runCatching {
-val intent = Intent(appCtx, BikeMicService::class.java)
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-appCtx.startForegroundService(intent)
-} else {
-appCtx.startService(intent)
-}
-}
-return eng
-}
-​fun stopAll(context: Context) {
-val appCtx = context.applicationContext
-runCatching { appCtx.stopService(Intent(appCtx, BikeMicService::class.java)) }
-runCatching { sharedEngine?.stop() }
-runCatching { sharedHealth?.stop() }
-sharedEngine = null
-sharedHealth = null
-}
-}
-​override fun onCreate() {
-super.onCreate()
-startInForegroundSafe()
-}
-​override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-startInForegroundSafe()
-ensureStarted(this)
-return START_STICKY
-}
-​private fun startInForegroundSafe() {
-runCatching {
-val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-val ch = NotificationChannel(
-CHANNEL_ID,
-"BikeMic الاتصال الصوتي في الخلفية",
-NotificationManager.IMPORTANCE_LOW
-).apply {
-description = "يبقي الاتصال الصوتي والبرقيات نشطة أثناء استخدام الخرائط أو قفل الشاشة"
-setShowBadge(false)
-}
-nm.createNotificationChannel(ch)
-}
-​val openIntent = Intent(this, MainActivity::class.java).apply {
-flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-}
-val piFlags = PendingIntent.FLAG_UPDATE_CURRENT or
-(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
-val pendingIntent = PendingIntent.getActivity(this, 0, openIntent, piFlags)
-​val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-Notification.Builder(this, CHANNEL_ID)
-} else {
-@Suppress("DEPRECATION")
-Notification.Builder(this)
-}
-​val notif = builder
-.setContentTitle("BikeMic نشط في الخلفية")
-.setContentText("التواصل والبرقيات شغالة أثناء استخدام الخريطة • اضغط للعودة")
-.setSmallIcon(android.R.drawable.ic_btn_speak_now)
-.setContentIntent(pendingIntent)
-.setOngoing(true)
-.build()
-​if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-startForeground(
-NOTIF_ID,
-notif,
-ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
-ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION or
-ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-)
-} else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-startForeground(
-NOTIF_ID,
-notif,
-ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
-ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-)
-} else {
-startForeground(NOTIF_ID, notif)
-}
-}
-}
-​override fun onBind(intent: Intent?): IBinder? = null
-}
-""")
-​# =========================================================
-# 11. MainActivity.kt
-#    - Exact same UI design preserved!
-#    - Connected to BikeMicService so switching to Google Maps keeps voice & mesh running in background
-#    - Shows "غير منضم للمحادثة" when a rider's Red Open Mic is closed (!p.isOpenMicOn)
-# =========================================================
-write("app/src/main/java/com/bikemic/app/MainActivity.kt", r"""
-package com.bikemic.app
-​import android.Manifest
-import android.annotation.SuppressLint
-import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.net.Uri
-import android.os.Build
-import android.os.Bundle
-import android.os.PowerManager
-import android.provider.Settings
-import android.view.KeyEvent
-import android.view.WindowManager
-import android.widget.Toast
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
-import kotlinx.coroutines.delay
-​class MainActivity : ComponentActivity() {
-private var engine: MeshVoiceEngine? = null
-private val permissionsGranted = mutableStateOf(false)
-private val volumeKeyPttActive = mutableStateOf(false)
-​private fun enableLockScreenVisibility() {
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-setShowWhenLocked(true)
-setTurnScreenOn(true)
-}
-@Suppress("DEPRECATION")
-window.addFlags(
-WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
-WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
-)
-}
-​@SuppressLint("BatteryLife")
-private fun requestIgnoreBatteryOptimizationsIfNeeded() {
-runCatching {
-val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-data = Uri.parse("package:$packageName")
-}
-startActivity(intent)
-}
-}
-}
-​private fun requiredPermissions(): Array<String> {
-val p = mutableListOf(
-Manifest.permission.RECORD_AUDIO,
-Manifest.permission.ACCESS_WIFI_STATE,
-Manifest.permission.CHANGE_WIFI_STATE,
-Manifest.permission.CHANGE_WIFI_MULTICAST_STATE,
-Manifest.permission.ACCESS_FINE_LOCATION,
-Manifest.permission.ACCESS_COARSE_LOCATION
-)
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-p.add(Manifest.permission.BLUETOOTH_CONNECT)
-}
-if (Build.VERSION.SDK_INT >= 33) {
-p.add(Manifest.permission.NEARBY_WIFI_DEVICES)
-p.add(Manifest.permission.POST_NOTIFICATIONS)
-}
-return p.toTypedArray()
-}
-​private val permLauncher = registerForActivityResult(
-ActivityResultContracts.RequestMultiplePermissions()
-) { result ->
-val audio = result[Manifest.permission.RECORD_AUDIO] == true ||
-ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-if (!audio) {
-Toast.makeText(this, "صلاحية المايك إلزامية. سيتم الإغلاق.", Toast.LENGTH_LONG).show()
-finishAffinity()
-} else {
-val fineLoc = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-if (!fineLoc) {
-Toast.makeText(this, "يرجى منح صلاحية الموقع لتفعيل نقطة الاتصال التلقائية", Toast.LENGTH_LONG).show()
-}
-permissionsGranted.value = true
-startAll()
-}
-}
-​override fun onCreate(savedInstanceState: Bundle?) {
-enableLockScreenVisibility()
-super.onCreate(savedInstanceState)
-val prefs = getSharedPreferences("bikemic_p2p", Context.MODE_PRIVATE)
-val defaultName = Build.MODEL?.take(12)?.ifBlank { "دراج" } ?: "دراج"
-​val missing = requiredPermissions().any {
-ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-}
-if (!missing) {
-permissionsGranted.value = true
-startAll()
-} else {
-permLauncher.launch(requiredPermissions())
-}
-​setContent {
-CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-MaterialTheme(colorScheme = darkColorScheme(background = Color.Black, surface = Color(0xFF121212))) {
-Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
-if (permissionsGranted.value && engine != null) {
-val ctx = LocalContext.current
-val volPtt by volumeKeyPttActive
-LaunchedEffect(Unit) {
-while (true) {
-engine?.leaderChangeEvent?.value?.let { msg ->
-Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
-engine?.leaderChangeEvent?.value = null
-}
-delay(500L)
-}
-}
-BikeMicScreen(
-engine = engine!!,
-externalPttActive = volPtt,
-initialName = prefs.getString("name", defaultName) ?: defaultName,
-initialRank = prefs.getInt("rank", 1),
-onSave = { n, r ->
-prefs.edit().putString("name", n).putInt("rank", r).apply()
-}
-)
-} else {
-Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-Column(horizontalAlignment = Alignment.CenterHorizontally) {
-CircularProgressIndicator(color = Color.Red)
-Spacer(Modifier.height(16.dp))
-Text("الرجاء منح صلاحيات المايك والموقع والبلوتوث للبدء...", color = Color.White)
-}
-}
-}
-}
-}
-}
-}
-}
-​override fun onResume() {
-super.onResume()
-enableLockScreenVisibility()
-engine?.refreshBluetoothNow()
-}
-​override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-if (!volumeKeyPttActive.value) {
-volumeKeyPttActive.value = true
-engine?.setPttPressed(true)
-}
-return true
-}
-if (keyCode == KeyEvent.KEYCODE_HEADSETHOOK ||
-keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
-keyCode == KeyEvent.KEYCODE_MEDIA_PLAY ||
-keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE ||
-keyCode == KeyEvent.KEYCODE_CALL) {
-engine?.toggleOpenMic()
-return true
-}
-return super.onKeyDown(keyCode, event)
-}
-​override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
-if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-if (volumeKeyPttActive.value) {
-volumeKeyPttActive.value = false
-engine?.setPttPressed(false)
-}
-return true
-}
-return super.onKeyUp(keyCode, event)
-}
-​private fun startAll() {
-engine = BikeMicService.ensureStarted(this)
-requestIgnoreBatteryOptimizationsIfNeeded()
-}
-​override fun onDestroy() {
-super.onDestroy()
-// Keep BikeMicService running in the background when switching to Google Maps or locking screen!
-}
-}
-​@Composable
-fun BikeMicScreen(
-engine: MeshVoiceEngine,
-externalPttActive: Boolean,
-initialName: String,
-initialRank: Int,
-onSave: (String, Int) -> Unit
-) {
-val ctx = LocalContext.current
-var name by remember { mutableStateOf(initialName) }
-var rank by remember { mutableIntStateOf(initialRank) }
-var editing by remember { mutableStateOf(false) }
-var touchPtt by remember { mutableStateOf(false) }
-val ptt = touchPtt || externalPttActive
-val micOn by engine.isOpenMicOnState
-var showUsers by remember { mutableStateOf(false) }
-var showRankDlg by remember { mutableStateOf(false) }
-var showInfo by remember { mutableStateOf(false) }
-​val peers = engine.peersListState
-val mutedPeerIds = engine.mutedPeersStateList
-val ver by engine.peersVersion
-val connected by engine.connectedCount
-val status by engine.statusText
-val autoBanner by engine.autoNetBanner
-val isBtConnected by engine.isBtConnectedState
-val btRouteLabel by engine.btRouteLabelState
-val speaker by engine.activeSpeakerName
-val ackSummary by engine.lastAckSummary
-val ackedNames = engine.ackedPeerNames
-val hostId by engine.currentHostIdState
-val sent by engine.debugSentCount
-val received by engine.debugReceivedCount
-val lastErr by engine.debugLastError
-​val isHost = hostId == engine.selfId
-val pttColor by animateColorAsState(
-if (ptt) Color(0xFFFFD60A) else Color(0xFF1E1E20), label = "p"
-)
-val micColor by animateColorAsState(
-if (micOn) Color(0xFFFF3B30) else Color(0xFF420D0D), label = "m"
-)
-​Column(
-modifier = Modifier
-.fillMaxSize()
-.background(Color.Black)
-.systemBarsPadding()
-.padding(horizontal = 16.dp, vertical = 10.dp),
-horizontalAlignment = Alignment.CenterHorizontally,
-verticalArrangement = Arrangement.SpaceBetween
-) {
-// ================= 1. TOP SECTION =================
-Column(
-modifier = Modifier.fillMaxWidth(),
-horizontalAlignment = Alignment.CenterHorizontally
-) {
-// Row 1: Top Action Bar
-Row(
-modifier = Modifier.fillMaxWidth(),
-horizontalArrangement = Arrangement.SpaceBetween,
-verticalAlignment = Alignment.CenterVertically
-) {
-Button(
-onClick = { showUsers = true },
-colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1C1C1E)),
-shape = RoundedCornerShape(12.dp),
-contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp)
-) {
-Icon(
-Icons.Default.Groups, null,
-tint = if (connected > 0) Color(0xFF32D74B) else Color(0xFFFF453A),
-modifier = Modifier.size(18.dp)
-)
-Spacer(Modifier.width(6.dp))
-Text(
-"متصلون ($connected)",
-color = Color.White,
-fontSize = 13.sp,
-fontWeight = FontWeight.Bold
-)
-}
-​Row(verticalAlignment = Alignment.CenterVertically) {
-IconButton(
-onClick = { engine.toggleAudioRoute() },
-modifier = Modifier.size(36.dp)
-) {
-Icon(
-if (isBtConnected) Icons.Default.BluetoothConnected else Icons.Default.VolumeUp,
-contentDescription = "البلوتوث / السماعة",
-tint = if (isBtConnected) Color(0xFF0A84FF) else Color(0xFF8E8E93)
-)
-}
-IconButton(
-onClick = { showInfo = true },
-modifier = Modifier.size(36.dp)
-) {
-Icon(
-Icons.Default.Info,
-contentDescription = "معلومات وتشخيص",
-tint = if (isHost) Color(0xFFFFD60A) else Color(0xFF8E8E93)
-)
-}
-Spacer(Modifier.width(4.dp))
-OutlinedButton(
-onClick = { showRankDlg = true },
-shape = RoundedCornerShape(12.dp),
-contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-) {
-Text(
-"راكب #$rank",
-color = if (isHost) Color(0xFFFFD60A) else Color.LightGray,
-fontWeight = FontWeight.Bold,
-fontSize = 12.sp
-)
-}
-}
-}
-​Spacer(Modifier.height(8.dp))
-​// Row 2: Organized Status Card
-Column(
-modifier = Modifier
-.fillMaxWidth()
-.clip(RoundedCornerShape(14.dp))
-.background(Color(0xFF141416))
-.border(1.dp, Color(0xFF2C2C2E), RoundedCornerShape(14.dp))
-.padding(horizontal = 12.dp, vertical = 8.dp),
-horizontalAlignment = Alignment.CenterHorizontally
-) {
-if (editing) {
-Row(verticalAlignment = Alignment.CenterVertically) {
-OutlinedTextField(
-value = name,
-onValueChange = { name = it },
-singleLine = true,
-textStyle = TextStyle(color = Color.White, fontSize = 15.sp, textAlign = TextAlign.Center),
-modifier = Modifier.width(200.dp)
-)
-IconButton(onClick = {
-editing = false
-engine.updateUser(name, rank)
-onSave(name, rank)
-}) {
-Icon(Icons.Default.Check, null, tint = Color(0xFF32D74B))
-}
-}
-} else {
-Row(
-modifier = Modifier.fillMaxWidth(),
-horizontalArrangement = Arrangement.SpaceBetween,
-verticalAlignment = Alignment.CenterVertically
-) {
-Row(
-modifier = Modifier
-.clip(RoundedCornerShape(6.dp))
-.clickable { editing = true }
-.padding(horizontal = 4.dp, vertical = 2.dp),
-verticalAlignment = Alignment.CenterVertically
-) {
-Text(name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-Spacer(Modifier.width(4.dp))
-Icon(Icons.Default.Edit, null, tint = Color.Gray, modifier = Modifier.size(14.dp))
-}
-​val leaderPrefix = if (isHost) "⭐ القائد • " else ""
-val myStatsText = "${leaderPrefix}قوة {engine.getSelfPowerScoreInt()} • 🔋{engine.batteryPct}% • ${thermalLabel(engine.thermalStatus)}"
-Text(
-text = myStatsText,
-color = if (isHost) Color(0xFFFFD60A) else Color(0xFFAEAEB2),
-fontSize = 11.sp,
-fontWeight = FontWeight.SemiBold
-)
-}
-}
-​Spacer(Modifier.height(6.dp))
-HorizontalDivider(color = Color(0xFF262629))
-Spacer(Modifier.height(6.dp))
-​Row(
-modifier = Modifier
-.fillMaxWidth()
-.clip(RoundedCornerShape(8.dp))
-.background(if (isBtConnected) Color(0xFF0B2545) else Color(0xFF1F1F22))
-.clickable { engine.toggleAudioRoute() }
-.padding(horizontal = 8.dp, vertical = 4.dp),
-verticalAlignment = Alignment.CenterVertically,
-horizontalArrangement = Arrangement.Center
-) {
-Icon(
-if (isBtConnected) Icons.Default.HeadsetMic else Icons.Default.VolumeUp,
-contentDescription = null,
-tint = if (isBtConnected) Color(0xFF5AC8FA) else Color(0xFFAEAEB2),
-modifier = Modifier.size(13.dp)
-)
-Spacer(Modifier.width(5.dp))
-Text(
-btRouteLabel,
-color = if (isBtConnected) Color(0xFF5AC8FA) else Color(0xFFAEAEB2),
-fontSize = 11.sp,
-maxLines = 1,
-overflow = TextOverflow.Ellipsis
-)
-}
-​Spacer(Modifier.height(4.dp))
-​Text(
-text = autoBanner,
-color = Color(0xFF32D74B),
-fontSize = 11.sp,
-fontWeight = FontWeight.SemiBold,
-maxLines = 1,
-overflow = TextOverflow.Ellipsis
-)
-​Text(
-text = speaker ?: status,
-color = if (speaker != null || connected > 0) Color(0xFF32D74B) else Color(0xFFFF9F0A),
-fontSize = 12.sp,
-fontWeight = if (speaker != null) FontWeight.Bold else FontWeight.Normal,
-maxLines = 1,
-overflow = TextOverflow.Ellipsis
-)
-}
-​// Row 3: Connected Riders Strip (Shows "غير منضم للمحادثة" when peer's Red Mic is OFF)
-if (peers.isNotEmpty()) {
-Spacer(Modifier.height(6.dp))
-LazyRow(
-horizontalArrangement = Arrangement.spacedBy(6.dp),
-contentPadding = PaddingValues(horizontal = 4.dp)
-) {
-items(peers, key = { it.nodeId }) { p ->
-val isPeerHost = p.nodeId == hostId
-val isPeerMuted = mutedPeerIds.contains(p.nodeId)
-val peerTag = "{p.name} (#{p.chainRank})"
-val didAck = ackedNames.contains(peerTag)
-val leadIcon = if (isPeerHost) "⭐ " else "🏍️ "
-val joinStateText = if (p.isOpenMicOn) "منضم 🎙️" else "غير منضم للمحادثة"
-val ackSuffix = if (didAck) " ✓" else ""
-val muteSuffix = if (isPeerMuted) " 🔇" else ""
-val chipText = "leadIcon{p.name} • joinStateText ({p.batteryPct}%)muteSuffixackSuffix"
-​Row(
-Modifier
-.clip(RoundedCornerShape(14.dp))
-.background(
-if (isPeerMuted) Color(0xFF3A1212)
-else if (didAck) Color(0xFF143D1B)
-else Color(0xFF1C1C1E)
-)
-.border(
-1.dp,
-if (isPeerMuted) Color(0xFFFF453A)
-else if (didAck) Color(0xFF32D74B)
-else if (isPeerHost) Color(0xFFFFD60A)
-else Color(0xFF3A3A3C),
-RoundedCornerShape(14.dp)
-)
-.clickable {
-engine.toggleMutePeerOpenMic(p.nodeId)
-val nowMuted = engine.mutedOpenMicPeerIds.contains(p.nodeId)
-val msg = if (nowMuted) {
-"تم كتم مايك ${p.name} المزعج (البرقيات الطارئة منه ستظل مسموعة)"
-} else {
-"تم إلغاء كتم مايك ${p.name}"
-}
-Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
-}
-.padding(horizontal = 10.dp, vertical = 4.dp),
-verticalAlignment = Alignment.CenterVertically
-) {
-Text(
-text = chipText,
-color = Color.White,
-fontSize = 11.sp,
-fontWeight = FontWeight.SemiBold
-)
-}
-}
-}
-}
-​// Row 4: Dedicated Non-Overlapping Delivery Confirmation (ACK) Banner
-if (ackSummary != null) {
-Spacer(Modifier.height(6.dp))
-Box(
-Modifier
-.fillMaxWidth()
-.clip(RoundedCornerShape(10.dp))
-.background(if (ackedNames.isNotEmpty()) Color(0xFF103818) else Color(0xFF2C2C2E))
-.border(
-1.dp,
-if (ackedNames.isNotEmpty()) Color(0xFF32D74B) else Color(0xFFFFD60A),
-RoundedCornerShape(10.dp)
-)
-.padding(horizontal = 10.dp, vertical = 5.dp),
-contentAlignment = Alignment.Center
-) {
-Text(
-text = ackSummary!!,
-color = if (ackedNames.isNotEmpty()) Color(0xFF32D74B) else Color(0xFFFFD60A),
-fontSize = 12.sp,
-fontWeight = FontWeight.Bold,
-maxLines = 1,
-overflow = TextOverflow.Ellipsis
-)
-}
-}
-}
-​// ================= 2. CENTER SECTION (Giant PTT Button - Never Overlaps!) =================
-Box(
-modifier = Modifier
-.size(210.dp)
-.clip(CircleShape)
-.background(pttColor)
-.border(4.dp, if (ptt) Color.White else Color(0xFFFFD60A), CircleShape)
-.pointerInput(Unit) {
-detectTapGestures(
-onPress = {
-touchPtt = true
-engine.setPttPressed(true)
-tryAwaitRelease()
-touchPtt = false
-engine.setPttPressed(false)
-}
-)
-},
-contentAlignment = Alignment.Center
-) {
-Column(horizontalAlignment = Alignment.CenterHorizontally) {
-Icon(
-Icons.Default.Bolt, null,
-tint = if (ptt) Color.Black else Color(0xFFFFD60A),
-modifier = Modifier.size(60.dp)
-)
-Text(
-if (ptt) "جاري إرسال البرقية..." else "اضغط مطولاً للبرقية",
-color = if (ptt) Color.Black else Color.White,
-fontSize = 16.sp,
-fontWeight = FontWeight.Bold
-)
-Spacer(Modifier.height(3.dp))
-Text(
-if (ptt) "تم خفض الموسيقى مؤقتاً وإرسال البرقية للجميع" else "يعمل بالخلفية وشاشة القفل ويخفض الموسيقى تلقائياً",
-color = if (ptt) Color(0xFF222222) else Color(0xFFAEAEB2),
-fontSize = 11.sp
-)
-}
-}
-​// ================= 3. BOTTOM SECTION (Red Open Mic Button) =================
-Column(
-horizontalAlignment = Alignment.CenterHorizontally,
-modifier = Modifier.padding(bottom = 6.dp)
-) {
-Box(
-modifier = Modifier
-.size(78.dp)
-.clip(CircleShape)
-.background(micColor)
-.border(2.dp, if (micOn) Color(0xFFFF8A80) else Color(0xFF8B0000), CircleShape)
-.clickable { engine.toggleOpenMic() },
-contentAlignment = Alignment.Center
-) {
-Icon(
-if (micOn) Icons.Default.Mic else Icons.Default.MicOff,
-null,
-tint = Color.White,
-modifier = Modifier.size(34.dp)
-)
-}
-Spacer(Modifier.height(6.dp))
-Text(
-if (micOn) "المايك الأحمر مفتوح (منضم للمحادثة • صوت نقي وسريع)" else "المايك الأحمر مطفأ (غير منضم للمحادثة • تسمع البرقيات فقط)",
-color = if (micOn) Color(0xFFFF453A) else Color(0xFF8E8E93),
-fontSize = 12.sp,
-fontWeight = FontWeight.SemiBold
-)
-}
-}
-​// ================= DIALOGS =================
-if (showUsers) {
-AlertDialog(
-onDismissRequest = { showUsers = false },
-containerColor = Color(0xFF1C1C1E),
-title = {
-Text(
-"الدراجون المتصلون (${peers.size + 1})",
-color = Color.White,
-fontWeight = FontWeight.Bold
-)
-},
-text = {
-Column {
-val selfRoleSuffix = if (isHost) " ⭐ القائد" else ""
-val selfChatStatus = if (micOn) "منضم للمحادثة" else "غير منضم للمحادثة"
-Row(
-Modifier
-.fillMaxWidth()
-.clip(RoundedCornerShape(8.dp))
-.background(Color(0xFF2C2C2E))
-.padding(horizontal = 10.dp, vertical = 6.dp),
-verticalAlignment = Alignment.CenterVertically
-) {
-Text(
-"أنت: name ($selfChatStatus) • بطارية ${engine.batteryPct}%$selfRoleSuffix",
-color = Color(0xFFFFD60A),
-fontWeight = FontWeight.Bold,
-fontSize = 12.sp
-)
-}
-Spacer(Modifier.height(6.dp))
-Text(
-"💡 من يغلق المايك الأحمر يظهر (غير منضم للمحادثة) ويسمع البرقيات فقط:",
-color = Color(0xFFAEAEB2),
-fontSize = 11.sp
-)
-Spacer(Modifier.height(6.dp))
-Row(
-Modifier.fillMaxWidth(),
-horizontalArrangement = Arrangement.spacedBy(8.dp)
-) {
-OutlinedButton(
-onClick = { engine.setAllOpenMicMuted(false) },
-modifier = Modifier.weight(1f),
-contentPadding = PaddingValues(vertical = 4.dp)
-) {
-Text("سماع الكل 🔊", color = Color(0xFF32D74B), fontSize = 12.sp)
-}
-OutlinedButton(
-onClick = { engine.setAllOpenMicMuted(true) },
-modifier = Modifier.weight(1f),
-contentPadding = PaddingValues(vertical = 4.dp)
-) {
-Text("كتم مايك الكل 🔇", color = Color(0xFFFF453A), fontSize = 12.sp)
-}
-}
-Spacer(Modifier.height(6.dp))
-HorizontalDivider(color = Color.DarkGray)
-Spacer(Modifier.height(8.dp))
-if (peers.isEmpty()) {
-Text(
-"التناوب التلقائي نشط: يفعّل نقطة الاتصال لمدة 40 ثانية، وإذا لم يجد أحداً يبحث عن الدراجين الآخرين تلقائياً حتى يلتقي الهاتفان.",
-color = Color.Gray, fontSize = 13.sp
-)
-} else {
-LazyColumn(Modifier.heightIn(max = 280.dp)) {
-items(peers, key = { it.nodeId }) { p ->
-val isHostP = p.nodeId == hostId
-val isMuted = mutedPeerIds.contains(p.nodeId)
-val peerKey = "${p.name} (#${p.chainRank})"
-val acked = ackedNames.contains(peerKey)
-val hostBadge = if (isHostP) " ⭐ (القائد)" else ""
-val ackBadge = if (acked) " • ✓ استلم البرقية" else ""
-val titleLine = "${p.name} (#{p.chainRank})hostBadgeackBadge"
-​Row(
-Modifier.fillMaxWidth().padding(vertical = 5.dp),
-verticalAlignment = Alignment.CenterVertically
-) {
-IconButton(
-onClick = { engine.toggleMutePeerOpenMic(p.nodeId) }
-) {
-Icon(
-imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-contentDescription = "كتم أو تشغيل مايك الراكب",
-tint = if (isMuted) Color(0xFFFF453A) else Color(0xFF32D74B)
-)
-}
-Column(Modifier.weight(1f)) {
-Text(
-titleLine,
-color = if (isHostP) Color(0xFFFFD60A) else Color.White,
-fontWeight = FontWeight.Bold,
-fontSize = 14.sp
-)
-val joinStatusLabel = if (!p.isOpenMicOn) {
-"⏸️ غير منضم للمحادثة (يسمع البرقيات فقط)"
-} else if (isMuted) {
-"🔇 منضم (مكتوم عندك • البرقية مسموعة)"
-} else {
-"🎙️ منضم للمحادثة (المايك مفتوح)"
-}
-Text(
-"$joinStatusLabel • بطارية ${p.batteryPct}% • ${thermalLabel(p.thermalStatus)}",
-color = if (!p.isOpenMicOn || isMuted) Color(0xFFFF9F0A) else Color(0xFF32D74B),
-fontSize = 11.sp
-)
-}
-}
-}
-}
-}
-}
-},
-confirmButton = {
-Button(
-onClick = { showUsers = false },
-colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F))
-) { Text("تم", color = Color.White) }
-}
-)
-}
-​if (showRankDlg) {
-AlertDialog(
-onDismissRequest = { showRankDlg = false },
-containerColor = Color(0xFF1C1C1E),
-title = { Text("رقمك في مجموعة الدراجين", color = Color.White) },
-text = {
-LazyColumn(Modifier.height(280.dp)) {
-items((1..12).toList()) { num ->
-val label = "راكب #$num"
-TextButton(
-onClick = {
-rank = num; engine.updateUser(name, num); onSave(name, num)
-showRankDlg = false
-},
-modifier = Modifier.fillMaxWidth()
-) {
-Text(
-label,
-color = if (rank == num) Color(0xFFFF453A) else Color.White,
-fontWeight = if (rank == num) FontWeight.Bold else FontWeight.Normal
-)
-}
-}
-}
-},
-confirmButton = {
-TextButton(onClick = { showRankDlg = false }) { Text("إغلاق", color = Color.Gray) }
-}
-)
-}
-​if (showInfo) {
-val ifaces = remember(sent, ver) { engine.getDebugInterfaces() }
-val bcasts = remember(sent, ver) { engine.getDebugBroadcasts() }
-val (gSsid, gPass) = remember(sent, ver) { engine.getAutoHotspotCredentials() }
-val currentLeaderName = if (isHost) {
-"أنت ($name)"
-} else {
-peers.find { it.nodeId == hostId }?.name ?: "غير معروف"
-}
-AlertDialog(
-onDismissRequest = { showInfo = false },
-containerColor = Color(0xFF1C1C1E),
-title = { Text("تشخيص البلوتوث والشبكة", color = Color.White, fontWeight = FontWeight.Bold) },
-text = {
-Column(
-modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
-verticalArrangement = Arrangement.spacedBy(5.dp)
-) {
-Text("حالة الصوت: $btRouteLabel", color = Color(0xFF5AC8FA), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-Text("قوة هاتفك الإجمالية: ${engine.getSelfPowerScoreInt()} نقطة (مواصفات الجهاز: ${engine.hardwareSpecScore})", color = Color(0xFFFFD60A), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-Text("القائد الحالي: $currentLeaderName", color = Color.White, fontSize = 12.sp)
-if (gSsid.isNotEmpty()) {
-Text("شبكة القائد التلقائية: $gSsid (كلمة المرور: $gPass)", color = Color(0xFF32D74B), fontSize = 11.sp)
-}
-HorizontalDivider(color = Color.DarkGray)
-Text("واجهات شبكتك:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-if (ifaces.isEmpty()) {
-Text("لا توجد واجهات نشطة!", color = Color.Red, fontSize = 12.sp)
-} else {
-ifaces.forEach { (ifName, ip) ->
-Text("• $ifName: $ip", color = Color.White, fontSize = 12.sp)
-}
-}
-HorizontalDivider(color = Color.DarkGray)
-Text("الأهداف النشطة:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-bcasts.forEach { b ->
-Text("• $b", color = Color.White, fontSize = 11.sp)
-}
-HorizontalDivider(color = Color.DarkGray)
-Text("إحصائيات:", color = Color(0xFF32D74B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
-Text("• حزم أُرسلت: $sent | مستلمة: $received", color = Color.White, fontSize = 12.sp)
-Text("• أقران متصلون: ${peers.size}", color = Color.White, fontSize = 12.sp)
-Text("• حالة النظام: $lastErr", color = Color.White, fontSize = 11.sp)
-}
-},
-confirmButton = {
-Button(
-onClick = { showInfo = false },
-colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF32D74B))
-) { Text("فهمت", color = Color.Black) }
-}
-)
-}
-}
-​fun thermalLabel(t: Int): String = when (t) {
-DeviceHealthMonitor.THERMAL_NONE -> "طبيعي"
-DeviceHealthMonitor.THERMAL_LIGHT -> "خفيف"
-DeviceHealthMonitor.THERMAL_MODERATE -> "متوسط"
-DeviceHealthMonitor.THERMAL_SEVERE -> "مرتفع ⚠️"
-else -> "حرج 🚨"
-}
-""")
-​print("BikeMic P2P Mesh project (v13 Auto-Hotspot Fix + Red Mic Chat Join/Leave + PTT Music Ducking + Background Service) generated successfully.")
-PYEOF
-python3 /tmp/gen_bikemic_p2p.py
-​- name: Build Release APK
-run: gradle assembleRelease --no-daemon --stacktrace
-​- name: Verify APK
-run: |
-ls -lh app/build/outputs/apk/release/
-test -f app/build/outputs/apk/release/app-release.apk
-echo "APK size: $(du -h app/build/outputs/apk/release/app-release.apk | cut -f1)"
-​- name: Upload APK
-uses: actions/upload-artifact@v4
-with:
-name: BikeMic-P2P-Mesh-Diagnostics-APK
-path: app/build/outputs/apk/release/app-release.apk
-retention-days: 30
+name: Build BikeMic P2P Mesh APK (v13)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Clean workspace from old files
+        run: |
+          rm -rf app build gradle settings.gradle settings.gradle.kts build.gradle build.gradle.kts gradle.properties local.properties
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Prepare Android SDK
+        run: |
+          export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          mkdir -p "$ANDROID_SDK_ROOT/licenses"
+          printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\nd56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
+          printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n" > "$ANDROID_SDK_ROOT/licenses/android-sdk-preview-license"
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+
+      - name: Generate temporary keystore (123456)
+        run: |
+          mkdir -p app
+          keytool -genkeypair -v \
+            -keystore app/release.keystore \
+            -storetype PKCS12 \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -alias bikemic \
+            -storepass 123456 -keypass 123456 \
+            -dname "CN=BikeMic, OU=Riders, O=BikeMic, L=Muscat, ST=Muscat, C=OM"
+          test -s app/release.keystore
+
+      - name: Generate P2P Mesh project (v13)
+        env:
+          RUN_NUM: ${{ github.run_number }}
+        run: |
+          base64 -d << 'B64EOF' | gunzip > /tmp/gen_bikemic_p2p.py
+          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
+          B64EOF
+          python3 /tmp/gen_bikemic_p2p.py
+
+      - name: Build Release APK
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Verify APK
+        run: |
+          ls -lh app/build/outputs/apk/release/
+          test -f app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BikeMic-P2P-Mesh-Diagnostics-APK
+          path: app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
